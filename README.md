@@ -40,3 +40,7 @@ Windows Codex 龙娘启动动画安装包。横向 **16:9、2560 × 1440、60 �
 ```text
 682928d2e6ce85bfb3d83acadb4e85da9efe4948a593a63e4dc2e605a08ff524
 ```
+
+## 社区交流
+
+社区交流：[LINUX DO](https://linux.do/)
