@@ -1,79 +1,89 @@
-Community V34 portable publication verification
-Verification date: 2026-10-16
+Community V34-r5 publication verification
+Date: 2026-10-18
 
-Distribution under review
-  CodexDragon-V34-Portable-Windows-x64-r2.zip
-  Bytes: 368941074
-  SHA256: AE1971D4907044BC4BBCA94A994410E383B7D5B2B9F338062AE73BFC68BCC377
+Approved complete distribution
+  CodexDragon-V34-Portable-Windows-x64-r5.zip
+  Bytes: 369032558
+  SHA256: E10D595C28821D1FF232E01FB7B00AF9AFFF7C2462C3F7E62EAAFAA40E456354
+  Manifest SHA256: 04DAE202D8FB31B40FC4DFF4E5D7E458D6A5F1725CD20B83C48615912F0F1C1D
 
-Scope and preserved behavior
-- The current installed runtime was not changed by the publication work.
-- Original 19 C# runtime source files, renderer and launcher configuration were
-  retained byte for byte. Public installation/entry wrappers are separate.
-- All 46 declared media/font/config assets are included at their original size
-  and quality. Both 15-second 2560x1440 wallpaper clips are included.
-- Initial ambient appearance, subsequent 75% ambient / 25% alternate selection,
-  10-15 second random interval, startup animation and escape behavior remain in
-  the preserved runtime. This is a source-preservation claim, not a statistical
-  proof of random frequencies from a long-duration run.
+Artifact identity and user validation
+- The contributor tested this r5 artifact on a second computer and reported it
+  working, then authorized publication. This is user-reported end-to-end
+  acceptance, not certification of all Windows/GPU combinations.
+- The published ZIP is byte-identical to that accepted r5-test ZIP. Only its
+  external filename drops '-test'. No recompilation, re-encoding or repacking
+  occurred after acceptance. Candidate/test/waiting-for-publication wording
+  inside the frozen archive is historical; this document and Release notes
+  give the current publication status.
+- All 54 files under community-v34/ match the archive's source/ byte-for-byte.
+  Repository README and this verification document are publication metadata.
 
-Packaging and local verification
-- The ZIP contains exactly 94 files: 93 manifest entries plus the manifest.
-  Every listed size and SHA256 matched. No extra, duplicate, case-aliased,
-  traversing, encrypted or symbolic-link ZIP entry was found.
-- Verification used a fresh directory with Chinese characters and spaces.
-- Real WPF startup preview opened intro/idle/finale media and exited normally.
-- Both wallpaper clips decoded in an isolated browser fixture, produced real
-  changing frames and reported 2560x1440 resolution without decoding errors.
-- Package installation uses a new destination, staging verification and rename.
-  Tests cover refusing an existing destination / invalid ownership and retaining
-  unrelated files or user-modified configuration during uninstall.
-- Path traversal/ADS rejection and repeated-click quiet-mode busy status were
-  exercised. --check and --configure return 75 when the public entry is busy.
-- Normal diagnostic logging and a real directory-junction rejection were tested.
-  Windows denied creation of file symlinks (error 1314): valid/dangling file-link
-  protection was reviewed in source but could NOT be exercised on this host.
-  The 120-second child-wait timeout was source-reviewed, not waited in real time.
+Fix scope
+- Bound native hide acknowledgement to 3 seconds, with at most six requests
+  spaced at least 500 ms apart. Only an observed hidden state advances.
+  Preserve identity/ownership checks and the current minimized state.
+- Order nonactivating show compensation after queued hide requests on both
+  successful placement and failed preparation. Isolated real-window fixtures
+  reproduced the old re-show race and late-hide failures.
+- Once the current operation/document/media is prepared, refresh read-only
+  state instead of sending repeated preparation commands during the finale.
+- Reconcile only an eligible prepare-response timeout with fresh matching
+  state before its original deadline. Do not replay the mutation or weaken
+  commit, protocol, transport, identity or cancellation checks.
+- Retain preceding readiness-transport and composer/footer transparency fixes,
+  and bounded numeric diagnostics for native readiness and request failures.
 
-Publication privacy review
-- Gitleaks 8.30.1 used default rules locally, with no project-specific allowlist.
-  No secret matches were found in the final source or full release tree.
-- Exact ZIP text members were checked for personal user paths, email addresses,
-  machine SIDs, private-key headers, JWT shapes and signed/authenticated URLs.
-  No matches were found. Scan reports contain locations/categories, not secrets.
-- PNG ancillary metadata, MP4 format/stream tags, executable string content and
-  font name/license records were inspected. Only public font provenance and
-  normal media metadata were retained. Assets were not re-encoded.
-- Account profiles, cookies, authentication files, local host/session config,
-  original logs, screenshots, private review bundles, old backups and official
-  Codex binaries are excluded. The local generated config is created on the
-  recipient's machine. No API key is needed for the pre-generated media.
-- Git uses the contributor's public username and GitHub noreply commit address.
-  These scans reduce risk; they are not a mathematical proof that a secret can
-  never be present. Release integrity hashes are not publisher signatures.
+Verification evidence
+- 117 ZIP entries: 116 manifest records plus release-manifest.json. All sizes
+  and hashes verified, with no unexpected entries. A new extraction also
+  passed package checks for all four .NET Framework 4.8 x64 executables.
+- All 46 original media/font/assets, including all six MP4 files, match r2 by
+  SHA256. The ambient and particle wallpapers, startup and finale remain in
+  the archive. Video quality, frame rates, rendering cadence, effects and
+  the 75/25 selection and 10-15 second interval have not been reduced.
+- Latest isolated regressions: 74 native-window assertions; 42 preparation
+  observation checks; 58 resource-diagnostic assertions; 35 actual host-loop,
+  14 renderer-function, 31 readiness, 19 target-selection and 20 runtime
+  diagnostic checks. Portable-report tests cover 30 groups, including malformed
+  fields and private-text exclusion. These are synthetic/isolated tests, not
+  performance benchmarks or multi-day reliability tests.
+- Test-source receipts were matched to packaged sources. The current installed
+  stable applications were not started, stopped or modified by publication.
+- The bounded report collector completed in about 0.8 seconds locally, without
+  starting, stopping or waiting for a client. Reports contain allowlisted
+  numeric/enum fields; raw logs, titles, handles, account data and paths are
+  excluded. Report generation does not claim a full media-integrity check.
 
-Compatibility and evidence limits
-- This was a same-PC isolated test, not a clean Windows VM or another physical
-  PC. A real cold launch of a second production Codex was intentionally avoided
-  to preserve the running installation. Native handoff fixtures do not prove
-  every actual Codex window/driver combination will behave identically.
-- Require Windows 10/11 x64, .NET Framework 4.8, Windows PowerShell 5.1, the user's
-  official Microsoft Store Codex x64 app, and working Windows media components.
-  Windows N editions may require Microsoft's Media Feature Pack.
-- The portable release uses Launch.exe. It does not copy the author's private
-  official-icon hook, overwrite official app files, install a service or task,
-  transfer account state, or open a public TCP debugging port.
-- Current package registration/signature is discovered locally. A future Codex
-  executable/layout change can still require an update; compatibility with all
-  future Windows/Codex releases is not claimed.
-- The four community-built EXEs are not commercially code-signed. Windows may
-  show an unknown-publisher warning. Verify the download's source and SHA256;
-  this package does not require turning off Windows security protection.
-- Wallpaper rendering shares the client's renderer/GPU failure boundary. Forced
-  host termination may affect its owned client. No full crash isolation, 24/48h,
-  ten-day stability or universal 144fps guarantee is claimed.
-- No upstream project-code license was found. Attribution and font OFL notices
-  are retained; this contribution does not invent new upstream/media licenses.
+Privacy and distribution
+- Source and complete release were scanned with Gitleaks default rules and
+  reviewed for credentials/private paths. Publication source and commit history
+  were scanned again. No secret findings were reported. Synthetic PRIVATE
+  paths in privacy tests are fixture text, not actual user profiles.
+- All asset hashes remain identical to the originally reviewed media; no new
+  media metadata, private screenshots or personal material is added.
+- Runtime output, account profiles, signed download URLs, host/session files,
+  personal logs, official Codex binaries and old backups are excluded.
+- Git commits use the contributor's public GitHub username and noreply address.
+  Scans reduce risk; checksums are integrity checks, not publisher signatures.
 
-The public source and complete release ZIP are complementary. GitHub's automatic
-source ZIP alone is not the ready-to-run wallpaper package.
+Compatibility and limits
+- Windows 10/11 x64, .NET Framework 4.8+, Windows PowerShell 5.1, working Windows
+  media components, and the current user's official Microsoft Store Codex x64
+  are required. Windows N may need Media Feature Pack.
+- Use Launch.exe from a fully extracted local writable directory. This public
+  package does not replace the official icon or copy personal installation hooks.
+- No CC Switch integration is included. Existing account configuration and
+  conversations are not part of the package.
+- Community EXEs are not commercially signed. Do not disable Windows security.
+- The observed long wait is fixed on the tested paths; this is not a universal
+  startup-duration guarantee. The underlying reason the reported target did
+  not acknowledge its first hide cannot be uniquely established from logs.
+- Future Codex/Windows changes, all GPUs, 24/48-hour or ten-day stability and
+  full host/renderer crash isolation are not certified by this release.
+- No upstream code license was found. Existing attribution and font OFL are
+  retained; no new license is imposed on upstream code or media.
+
+The r2 downloadable assets are withdrawn after r5 upload verification. Its old
+release page directs users to r5; its historical tag is not rewritten. The
+upstream pull request remains subject to the maintainer's review and merge.

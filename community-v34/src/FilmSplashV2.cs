@@ -863,7 +863,7 @@ namespace DragonLauncher
                     if(living==null)session.Status(500);
                     else {
                         if(request==null)return;
-                        BridgeStatus fresh=session.Prepare(request.OperationId,1800);
+                        BridgeStatus fresh=session.ObservePreparation(request,1800);
                         Dispatcher.BeginInvoke(new Action(delegate {
                             if(!cleaned&&Object.ReferenceEquals(wallpaperSession,session))
                                 preparation.Accept(request,session,fresh,clock.Elapsed.TotalSeconds);

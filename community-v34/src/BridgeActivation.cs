@@ -257,6 +257,11 @@ namespace DragonLauncher
         {return Control("refresh",timeout);}
         internal BridgeStatus Prepare(string operationId,int timeout)
         {if(!StartupPreparation.ValidId(operationId))throw new ArgumentException("bridge-operation-rejected");return Control("prepare "+operationId,timeout);}
+        internal BridgeStatus ObservePreparation(StartupPreparation.Request request,int timeout)
+        {
+            if(request==null||!Object.ReferenceEquals(request.Session,this))throw new ArgumentException("bridge-observation-session-rejected");
+            return request.ObserveOnly?Refresh(timeout):Prepare(request.OperationId,timeout);
+        }
         internal static bool ValidCommand(string command)
         {
             if(command=="status"||command=="reveal"||command=="pause"||command=="disable"||command=="refresh")return true;

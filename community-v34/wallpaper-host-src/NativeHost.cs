@@ -10,7 +10,12 @@ using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace CodexDragonWallpaper {
-internal sealed class HostFailure : Exception { internal readonly int Code; internal HostFailure(int code) : base("HOST_" + code) { Code = code; } }
+internal sealed class HostFailure : Exception {
+    internal readonly int Code,TimeoutStage;
+    internal HostFailure(int code) : this(code,0) {}
+    // Numeric boundary only: 1=write lock, 2=pipe write, 3=response wait.
+    internal HostFailure(int code,int timeoutStage) : base("HOST_"+code) {Code=code;TimeoutStage=code==37&&timeoutStage>=1&&timeoutStage<=3?timeoutStage:0;}
+}
 internal static class Native {
     internal const uint INFINITE = 0xffffffff;
     [StructLayout(LayoutKind.Sequential)] internal struct SecurityAttributes { internal int Size; internal IntPtr Descriptor; [MarshalAs(UnmanagedType.Bool)] internal bool Inherit; }

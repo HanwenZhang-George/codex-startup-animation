@@ -168,6 +168,65 @@ internal static class PreparationDiagnostics {
     internal static void RecordFailure(int phase,long elapsedMilliseconds,Exception error){
         var failure=error as HostFailure;RecordEvent(phase,elapsedMilliseconds,failure==null?199:100+failure.Code,error);
     }
+    internal static string FormatTargetRequest(int kind,long elapsed,int budget,int code,int timeoutStage,long bytes,long frames,long matched,long late){
+        if(kind<1||kind>2||budget<1||budget>12000||timeoutStage<0||timeoutStage>3||bytes<0||frames<0||matched<0||late<0)throw new ArgumentOutOfRangeException();
+        var culture=System.Globalization.CultureInfo.InvariantCulture;
+        // No CDP payload, URL, target/session identifier or exception text.
+        return FormatEvent(36,elapsed,code,null).TrimEnd('\r','\n')+
+            " commandKind="+kind.ToString(culture)+" requestBudgetMs="+budget.ToString(culture)+" timeoutStage="+timeoutStage.ToString(culture)+
+            " bytesReceived="+bytes.ToString(culture)+" framesReceived="+frames.ToString(culture)+
+            " matchedResponses="+matched.ToString(culture)+" lateResponses="+late.ToString(culture)+Environment.NewLine;
+    }
+    internal static void RecordTargetRequest(int kind,long elapsed,int budget,int code,int timeoutStage,CdpTransport transport){
+        try{Enqueue(FormatTargetRequest(kind,elapsed,budget,code,timeoutStage,transport.BytesReceived,transport.FramesReceived,transport.MatchedResponses,transport.LateResponses));}catch{}
+    }
+    internal static string FormatPreparationRead(int sourcePhase,int kind,long elapsed,int budget,int code,int timeoutStage,long bytes,long frames,long matched,long late){
+        if((sourcePhase!=2&&sourcePhase!=6&&sourcePhase!=10)||kind<1||kind>3||budget<1||budget>1500||timeoutStage<0||timeoutStage>3||bytes<0||frames<0||matched<0||late<0)throw new ArgumentOutOfRangeException();
+        var c=System.Globalization.CultureInfo.InvariantCulture;
+        return FormatEvent(37,elapsed,code,null).TrimEnd('\r','\n')+" sourcePhase="+sourcePhase.ToString(c)+" observationKind="+kind.ToString(c)+
+            " requestBudgetMs="+budget.ToString(c)+" timeoutStage="+timeoutStage.ToString(c)+" bytesReceived="+bytes.ToString(c)+
+            " framesReceived="+frames.ToString(c)+" matchedResponses="+matched.ToString(c)+" lateResponses="+late.ToString(c)+Environment.NewLine;
+    }
+    internal static void RecordPreparationRead(int sourcePhase,int kind,long elapsed,int budget,int code,int timeoutStage,CdpTransport transport){
+        try{Enqueue(FormatPreparationRead(sourcePhase,kind,elapsed,budget,code,timeoutStage,transport.BytesReceived,transport.FramesReceived,transport.MatchedResponses,transport.LateResponses));}catch{}
+    }
+    internal static string FormatReadinessObservation(int sourcePhase,long elapsed,Dictionary<string,object> status,string generation){
+        if(sourcePhase!=2&&sourcePhase!=6&&sourcePhase!=10)throw new ArgumentOutOfRangeException();
+        var fields=new StringBuilder(FormatEvent(38,elapsed,0,null).TrimEnd('\r','\n'));
+        fields.Append(" sourcePhase=").Append(sourcePhase.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        foreach(string key in new[]{"rootReady","bodyReady","layoutSupported","documentHidden","attached","mediaReady","prepared","disposed","firstFrameConfirmed","layoutWindowElectron"})fields.Append(' ').Append(key).Append('=').Append(SnapshotBoolean(SnapshotValue(status,key)));
+        foreach(string key in new[]{"layoutMainCount","layoutActiveMainCount"})fields.Append(' ').Append(key).Append('=').Append(SnapshotNumber(SnapshotValue(status,key),129));
+        object actual=SnapshotValue(status,"documentGeneration");fields.Append(" generationMatches=").Append(actual is string&&generation!=null?((string)actual==generation?"1":"0"):"-1");
+        return fields.Append(Environment.NewLine).ToString();
+    }
+    internal static void RecordReadinessObservation(int sourcePhase,long elapsed,Dictionary<string,object> status,string generation){
+        try{Enqueue(FormatReadinessObservation(sourcePhase,elapsed,status,generation));}catch{}
+    }
+    internal static string FormatRuntimeObservation(Dictionary<string,object> status,string generation,long elapsed){
+        var snapshot=CapturePreparationSnapshot(status,generation,elapsed);
+        if(snapshot==null)throw new ArgumentOutOfRangeException();
+        return FormatEvent(39,elapsed,0,null).TrimEnd('\r','\n')+snapshot.Fields+
+            " commitAccepted="+SnapshotBoolean(SnapshotValue(status,"commitAccepted"))+Environment.NewLine;
+    }
+    internal static string FormatPlaybackQuality(Dictionary<string,object> status,long elapsed){
+        if(status==null)throw new ArgumentNullException("status");
+        var line=new StringBuilder(FormatEvent(40,elapsed,0,null).TrimEnd('\r','\n'));
+        foreach(string key in new[]{"videoTotalFrames","videoDroppedFrames","videoCorruptedFrames","mediaGeneration","presentedFrames"})line.Append(' ').Append(key).Append('=').Append(SnapshotNumber(SnapshotValue(status,key),Int32.MaxValue));
+        foreach(string key in new[]{"videoWidth","videoHeight"})line.Append(' ').Append(key).Append('=').Append(SnapshotNumber(SnapshotValue(status,key),16384));
+        return line.Append(Environment.NewLine).ToString();
+    }
+    internal static void RecordRuntimeObservation(Dictionary<string,object> status,string generation,long elapsed){
+        try{Enqueue(FormatRuntimeObservation(status,generation,elapsed));Enqueue(FormatPlaybackQuality(status,elapsed));}catch{}
+    }
+    internal static string FormatRuntimeRequest(int kind,long elapsed,long requestElapsed,int budget,HostFailure error){
+        if(kind<1||kind>4||elapsed<0||elapsed>31536000000L||requestElapsed<0||requestElapsed>31536000000L||budget<1||budget>750||error==null||error.TimeoutStage<0||error.TimeoutStage>3)throw new ArgumentOutOfRangeException();
+        var c=System.Globalization.CultureInfo.InvariantCulture;
+        return FormatEvent(41,elapsed,100+error.Code,error).TrimEnd('\r','\n')+" operationKind="+kind.ToString(c)+
+            " requestElapsedMs="+requestElapsed.ToString(c)+" requestBudgetMs="+budget.ToString(c)+" timeoutStage="+error.TimeoutStage.ToString(c)+Environment.NewLine;
+    }
+    internal static void RecordRuntimeRequest(int kind,long elapsed,long requestElapsed,int budget,HostFailure error){
+        try{Enqueue(FormatRuntimeRequest(kind,elapsed,requestElapsed,budget,error));}catch{}
+    }
     internal static string FormatLine(int phase,long elapsedMilliseconds,int code){
         if(phase<0||phase>15||elapsedMilliseconds<0||elapsedMilliseconds>31536000000L||code<0||code>65535)throw new ArgumentOutOfRangeException();
         return DateTime.UtcNow.ToString("o",System.Globalization.CultureInfo.InvariantCulture)+" phase="+phase.ToString(System.Globalization.CultureInfo.InvariantCulture)+" elapsedMs="+elapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture)+" code="+code.ToString(System.Globalization.CultureInfo.InvariantCulture)+Environment.NewLine;
@@ -226,6 +285,22 @@ internal static class PreparationDiagnostics {
             }
         }catch{}
     }
+}
+internal sealed class RuntimeSnapshotRecorder {
+    readonly Action<Dictionary<string,object>,string,long> record;
+    string lastState;long lastRecorded=-1;
+    internal RuntimeSnapshotRecorder():this(PreparationDiagnostics.RecordRuntimeObservation){}
+    internal RuntimeSnapshotRecorder(Action<Dictionary<string,object>,string,long> record){this.record=record;}
+    internal void Observe(Dictionary<string,object> status,string generation,long elapsed){try{
+        if(status==null||elapsed<0||elapsed>31536000000L)return;
+        string signature=Json.Text(status,"actualPhase")+"|"+Json.Text(status,"health")+"|"+Json.Text(status,"code")+"|"+
+            Json.Bool(status,"commitAccepted")+"|"+Json.Bool(status,"firstFrameConfirmed")+"|"+Json.Bool(status,"revealed")+"|"+
+            Json.Bool(status,"documentHidden")+"|"+Json.Bool(status,"memoryPressure")+"|"+Json.Bool(status,"wallpaperApplied");
+        // Reuse already validated observations. No timer or extra CDP request.
+        // At most one pair per 2 s on transitions, or per 30 s in steady state.
+        if(lastRecorded>=0&&(elapsed-lastRecorded<2000||(signature==lastState&&elapsed-lastRecorded<30000)))return;
+        lastRecorded=elapsed;lastState=signature;record(status,generation,elapsed);
+    }catch{}}
 }
 internal sealed class RotationSnapshotRecorder {
     readonly Action<string,long,bool,bool,long> record;

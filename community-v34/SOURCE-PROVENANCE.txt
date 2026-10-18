@@ -4,10 +4,20 @@ Upstream project: https://github.com/mytjxs/codex-startup-animation
 Customization and release packaging contributor: HanwenZhang-George (GitHub).
 This is a community customization, not an official OpenAI distribution.
 
-The 19 C# files under src/ and wallpaper-host-src/, together with renderer.js,
-are preserved from the working runtime. The public build explicitly includes
+The C# files under src/ and wallpaper-host-src/, together with renderer.js,
+originate from the working runtime. Public candidates include targeted,
+tested compatibility and diagnostic changes; they are not byte-identical
+to the original runtime. The public build explicitly includes
 StartupReliability.cs and NativeRestoreGuard.cs, with .NET Framework 4.8 metadata
 and a Windows compatibility manifest.
+
+The r4 test candidate preserves r3 bounded read-only readiness retries and
+adds an expiry-guarded single-command lease/prepare/commit path, stable-runtime
+footer transparency compatibility, and bounded numeric runtime diagnostics.
+All 46 original media assets, including six MP4 files, remain hash-identical.
+Video encoding, frame rate, rendering cadence and animation effects are unchanged.
+No claim of universal hardware compatibility or resolved target-machine stutter
+is made by the isolated synthetic tests. Release publication awaits user testing.
 
 src/WallpaperSetup.cs and src/SetupReleaseManifest.cs are retained for historical
 source review only. They belong to the former machine-specific setup chain and
@@ -29,3 +39,12 @@ the upstream maintainer's clarification. The contributor has requested submissio
 of this customization and its generated media for review. This statement does
 not assert that all third-party rights have been cleared. FONT-LICENSE.txt
 preserves the bundled LXGW WenKai TC font's SIL Open Font License notice.
+
+The r5 candidate additionally bounds and confirms native hide requests, preserves
+pending-request rollback, and changes confirmed preparation polling into read-only
+observations. A preparation response timeout is reconciled by fresh matching state,
+without replaying the mutation or extending its original operation deadline.
+Native-window and named-pipe fixtures exercise these paths in isolation.
+Reference API semantics: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindowasync
+All original media and visual settings remain unchanged; this is a test candidate,
+not a claim that every target-machine startup or performance issue is resolved.

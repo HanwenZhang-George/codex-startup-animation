@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$MediaRoot,
     [string]$OutputDirectory=(Join-Path $PSScriptRoot 'dist\CodexDragon'),
@@ -64,18 +64,19 @@ foreach($record in $mediaManifest.files){[void]$pins.AppendLine(('new MediaPin{{
 [void]$pins.AppendLine('}; } }')
 $pinsPath=Join-Path $build 'BootstrapPins.cs';Write-Utf8 $pinsPath $pins.ToString()
 Compile 'Launch.exe' 'CodexDragonPublic.PortableLaunch' ($hostFiles+@((Join-Path $source 'packaging/PortableLaunch.cs'),$pinsPath))
-foreach($name in @('Install.ps1','Uninstall.ps1','PackageTools.ps1')){Copy-Item -LiteralPath (Join-Path $source ('packaging/'+$name)) -Destination $output}
+foreach($name in @('Install.ps1','Uninstall.ps1','PackageTools.ps1','Collect-DiagnosticReport.ps1','DiagnosticReport.Common.ps1')){Copy-Item -LiteralPath (Join-Path $source ('packaging/'+$name)) -Destination $output}
 Copy-Item -LiteralPath (Join-Path $source 'README.txt') -Destination $output
 Copy-Item -LiteralPath (Join-Path $source 'FONT-LICENSE.txt') -Destination $output
+Copy-Item -LiteralPath (Join-Path $source 'START-HERE.txt') -Destination $output
 # Include the complete reviewed source in the user ZIP; no history, credentials,
 # previous deployments, application binaries, profiles or local logs are copied.
 $codeTarget=Join-Path $output 'source';[IO.Directory]::CreateDirectory($codeTarget)|Out-Null
-$codeFiles=@('Build.ps1','README.txt','FONT-LICENSE.txt','media-manifest.json','launcher.config.xml','renderer.js','.gitignore','SOURCE-PROVENANCE.txt')
+$codeFiles=@('Build.ps1','README.txt','FONT-LICENSE.txt','media-manifest.json','launcher.config.xml','renderer.js','.gitignore','SOURCE-PROVENANCE.txt','START-HERE.txt')
 foreach($name in $codeFiles){Copy-Item -LiteralPath (Join-Path $source $name) -Destination $codeTarget}
 foreach($folder in @('src','wallpaper-host-src','packaging','build-inputs','tests')){Copy-Item -LiteralPath (Join-Path $source $folder) -Destination $codeTarget -Recurse}
 Write-Utf8 (Join-Path $output 'build/build-receipt.json') (@{schemaVersion=1;compiler='Windows .NET Framework 4.x csc.exe';components=@($compiled);sourcePathsAreRelative=$true;fullMediaVerified=$true}|ConvertTo-Json -Depth 6)
 $records=@(Get-ChildItem -LiteralPath $output -Recurse -File|Sort-Object FullName|ForEach-Object {[ordered]@{path=$_.FullName.Substring($output.Length+1).Replace('\','/');bytes=$_.Length;sha256=Get-Sha256 $_.FullName}})
-Write-Utf8 (Join-Path $output 'release-manifest.json') (@{schemaVersion=1;product='CodexDragonPublic';version='34.1-portable-candidate';files=$records}|ConvertTo-Json -Depth 6)
+Write-Utf8 (Join-Path $output 'release-manifest.json') (@{schemaVersion=1;product='CodexDragonPublic';version='34.1-native-ack-r5-test';files=$records}|ConvertTo-Json -Depth 6)
 Test-PackageFiles $output (Read-PackageManifest $output)
 if(-not $SkipZip) {
     $zip=$output+'.zip';if(Test-Path -LiteralPath $zip){throw 'ZIP already exists; choose a fresh output directory.'}

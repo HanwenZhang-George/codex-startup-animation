@@ -1,8 +1,22 @@
-> **Community V34 contribution:** a more extensively customized startup animation and dynamic wallpaper is available for review in [`community-v34/`](community-v34/README.txt). The original v1.0.0 instructions below are preserved.
->
-> The V34 ready-to-run distribution is **`CodexDragon-V34-Portable-Windows-x64-r2.zip`**, supplied as a Release asset with both wallpaper videos, all character assets, font, source and executables. GitHub's **Code → Download ZIP** is source only. Read the requirements and verification limits in `community-v34/README.txt` before installing.
->
-> The portable version starts through **`Launch.exe`**; it does not replace the official Codex icon or contain the author's local account/configuration. Contributor: **HanwenZhang-George**. No new license is assigned to upstream code or media.
+## V34-r5 社区修复版：完整启动动画与动态壁纸
+
+**请下载 r5；旧 r2 已撤回，避免继续遇到跨电脑启动失败和 59% 长时间等待。**
+
+[下载完整 Windows x64 包](https://github.com/HanwenZhang-George/codex-startup-animation/releases/download/community-v34-r5/CodexDragon-V34-Portable-Windows-x64-r5.zip) · [发布说明与 SHA-256](https://github.com/HanwenZhang-George/codex-startup-animation/releases/tag/community-v34-r5) · [验证记录](VERIFICATION.txt)
+
+完整解压到新目录，保存工作并正常退出已运行的 Codex，然后双击最外层 **Launch.exe**。不用先运行安装脚本。**Code → Download ZIP / Source code ZIP 只有源码，不是完整可运行包。**
+
+完整包包含全部 46 项原始素材、其中 6 个 MP4、两种动态壁纸、流泪转场、字体、源码和四个程序，不包含 CC Switch。素材质量和原有动画效果未降低。需要 Windows 10/11 x64、.NET Framework 4.8、Windows PowerShell 5.1、正常媒体组件，以及本机已安装并登录的官方 Microsoft Store Codex x64。
+
+本次公开包与另一台电脑上用户确认可用的 r5 测试 ZIP **字节完全一致**，仅对外文件名去掉 `-test`。为保留原包哈希，包内候选版/等待测试字样未重写；当前发布状态以本页面和 Release 说明为准。`community-v34/` 保留包内源码原字节，实际验证范围和兼容性限制见 [VERIFICATION.txt](VERIFICATION.txt)。
+
+首次使用常态壁纸，之后 75% 常态 / 25% 粒子视频，两次出现间隔 10–15 秒。该社区包通过 Launch.exe 启动，不替换官方图标，不带作者账号、API Key 或私人配置，也不是 OpenAI 官方发行版。贡献者：HanwenZhang-George；保留原项目及字体来源，不为上游代码和媒体新增授权。
+
+遇到问题可在解压目录运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Collect-DiagnosticReport.ps1"`。它只收集固定字段的脱敏报告，不启动、关闭或等待应用。请勿上传账号配置或整个运行目录。
+
+---
+
+以下保留原项目 v1.0.0 的历史说明；上面的 r5 链接是此社区版本的当前下载入口。
 
 # codex启动动画
 

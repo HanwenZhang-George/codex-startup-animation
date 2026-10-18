@@ -26,6 +26,11 @@ internal sealed class CdpTransport {
     sealed class Pending { internal readonly ManualResetEventSlim Done=new ManualResetEventSlim(false,0);internal object Result;internal int Error;internal string Session; }
     readonly OwnedClient client;readonly bool isolated;readonly object gate=new object(),writeGate=new object();
     readonly Dictionary<int,Pending> pending=new Dictionary<int,Pending>();int nextId;int fault;volatile bool ended;
+    long bytesReceived,framesReceived,matchedResponses,lateResponses;
+    internal long BytesReceived {get{return Interlocked.Read(ref bytesReceived);}}
+    internal long FramesReceived {get{return Interlocked.Read(ref framesReceived);}}
+    internal long MatchedResponses {get{return Interlocked.Read(ref matchedResponses);}}
+    internal long LateResponses {get{return Interlocked.Read(ref lateResponses);}}
     internal event Action<string,string> Signal;
     internal bool Faulted {get{return Interlocked.CompareExchange(ref fault,0,0)!=0||ended;}}
     static readonly HashSet<string> allowed=new HashSet<string>{"Target.getTargets","Target.attachToTarget","Target.detachFromTarget","Runtime.evaluate","Runtime.addBinding","Runtime.removeBinding","DOM.getDocument","DOM.querySelector","DOM.describeNode","DOM.setFileInputFiles"};
@@ -33,6 +38,7 @@ internal sealed class CdpTransport {
     void Notify(string kind,string session){var handler=Signal;if(handler!=null)try{handler(kind,session);}catch{}}
     void Fail(int code){bool first=Interlocked.CompareExchange(ref fault,code,0)==0;lock(gate){foreach(var request in pending.Values){request.Error=code;request.Done.Set();}}if(first)Notify("transport-fault",null);}
     void Frame(byte[] buffer,int count){
+        Interlocked.Increment(ref framesReceived);
         try {var m=Json.Map(Json.Serializer().DeserializeObject(new UTF8Encoding(false,true).GetString(buffer,0,count)));
             object idObject=Json.Get(m,"id");if(!(idObject is int)){
                 string method=Json.Text(m,"method"),eventSession=Json.Text(m,"sessionId");var parameters=Json.Get(m,"params") as Dictionary<string,object>;
@@ -41,7 +47,8 @@ internal sealed class CdpTransport {
                 else if(method=="Inspector.targetCrashed"||method=="Inspector.detached")Notify("target-lost",eventSession);
                 return;
             }int id=(int)idObject;Pending request;
-            lock(gate){if(!pending.TryGetValue(id,out request))return;
+            lock(gate){if(!pending.TryGetValue(id,out request)){Interlocked.Increment(ref lateResponses);return;}
+                Interlocked.Increment(ref matchedResponses);
                 string session=Json.Text(m,"sessionId");if(session!=request.Session){request.Error=31;request.Done.Set();return;}
                 if(Json.Get(m,"error")!=null)request.Error=32;else request.Result=Json.Get(m,"result");request.Done.Set();
             }
@@ -51,6 +58,7 @@ internal sealed class CdpTransport {
         const int initialFrame=8192,maxFrame=1048576,retainedFrame=65536;
         var chunk=new byte[8192];var frame=new byte[initialFrame];int used=0;
         try {for(;;){int n=client.Read.Read(chunk,0,chunk.Length);if(n==0)break;
+            Interlocked.Add(ref bytesReceived,n);
             // A fault is terminal for commands, but the owned child's pipe must
             // stay open and be drained until process exit. Do not deserialize
             // its later events or keep a large frame alive after terminal failure.
@@ -84,15 +92,15 @@ internal sealed class CdpTransport {
         lock(gate){if(pending.Count>=4){request.Done.Dispose();throw new HostFailure(38);}pending.Add(id,request);}
         bool writer=false;
         try {
-            int remaining=Deadline.Remaining(timeout,deadline.ElapsedMilliseconds);if(remaining<=0||!Monitor.TryEnter(writeGate,remaining))throw new HostFailure(37);writer=true;
+            int remaining=Deadline.Remaining(timeout,deadline.ElapsedMilliseconds);if(remaining<=0||!Monitor.TryEnter(writeGate,remaining))throw new HostFailure(37,1);writer=true;
             try{
                 if(fault!=0)throw new HostFailure(fault);
-                remaining=Deadline.Remaining(timeout,deadline.ElapsedMilliseconds);if(remaining<=0)throw new HostFailure(37);
+                remaining=Deadline.Remaining(timeout,deadline.ElapsedMilliseconds);if(remaining<=0)throw new HostFailure(37,2);
                 Task written=Task.Factory.FromAsync(client.Write.BeginWrite,client.Write.EndWrite,bytes,0,bytes.Length,null);
-                if(!written.Wait(remaining)){written.ContinueWith(t=>{var ignored=t.Exception;},TaskContinuationOptions.OnlyOnFaulted);Fail(37);throw new HostFailure(37);}
+                if(!written.Wait(remaining)){written.ContinueWith(t=>{var ignored=t.Exception;},TaskContinuationOptions.OnlyOnFaulted);Fail(37);throw new HostFailure(37,2);}
             }finally{if(writer){Monitor.Exit(writeGate);writer=false;}}
             remaining=Deadline.Remaining(timeout,deadline.ElapsedMilliseconds);
-            if(remaining<=0||!request.Done.Wait(remaining))throw new HostFailure(37);
+            if(remaining<=0||!request.Done.Wait(remaining))throw new HostFailure(37,3);
             if(request.Error!=0)throw new HostFailure(request.Error);return Json.Map(request.Result);
         }finally{if(writer)Monitor.Exit(writeGate);lock(gate)pending.Remove(id);request.Done.Dispose();}
     }

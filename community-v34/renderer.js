@@ -96,8 +96,8 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
 /* Clear only verified footer decorations. Glass variables style the composer;
    menus and controls retain their native behavior. Removing the marker restores
    the client's original backgrounds without changing its DOM or layout. */
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 [data-thread-scroll-footer="true"] > div[aria-hidden="true"].pointer-events-none.absolute.inset-x-0.z-0.bottom-0.mt-8.bg-surface { background-color: transparent !important; }
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 .thread-scroll-container > div > div[aria-hidden="true"].pointer-events-none.sticky.bottom-0.z-10 > div[aria-hidden="true"].pointer-events-none.absolute.inset-x-0.z-0.h-8.bg-gradient-to-t.from-surface { background-image: none !important; }
+html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 [data-thread-scroll-footer="true"] > div[aria-hidden="true"].pointer-events-none.absolute.inset-x-0.z-0.bottom-0.bg-surface { background-color: transparent !important; }
+html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 .thread-scroll-container > div > div[aria-hidden="true"].pointer-events-none.sticky.bottom-0.z-10 > div[aria-hidden="true"].pointer-events-none.absolute.inset-x-0.z-0.from-surface { background-image: none !important; }
 html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 [data-thread-scroll-footer="true"]:has([data-thread-focus-mode]) { background-color: transparent !important; }
 #codex-dragon-stage-v1 { position: absolute; inset: 0; z-index: -20; pointer-events: none; overflow: hidden; background: var(--color-surface, #101518); contain: strict; }
 #codex-dragon-stage-v1 video { width: 100%; height: 100%; object-fit: cover; object-position: right center; opacity: 0; }
@@ -354,8 +354,8 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
     while (ancestor && ancestor !== root && depth++ < 24) { spines.add(ancestor); ancestor = ancestor.parentElement; }
     if (ancestor !== root) return false;
     spines.add(root);
-    // Inspect direct shell children only. Never enumerate classes throughout
-    // conversation content, and never descend into MainContentFrame/text rows.
+    // Inspect direct shell children only. The frame exception below reads only
+    // its semantic chrome wrapper, never conversation descendants or text rows.
     function children(node) { if (node.children.length > 128) return false; for (const child of node.children) nodes.add(child); return nodes.size <= 128; }
     for (const spine of spines) { nodes.add(spine); if (!children(spine)) return false; }
     if (!children(workspace)) return false;
@@ -364,7 +364,28 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
       containers.add(child);
       if (!children(child)) return false;
       for (const wrapper of child.children) {
-        if (componentToken(wrapper, 'MainContentFrame') || wrapper.tagName === 'ARTICLE') continue;
+        if (String(wrapper.className || '').split(/\s+/).some(token => token.startsWith('_MainContentFrame_'))) {
+          const frameToken = componentToken(wrapper, 'MainContentFrame');
+          if (!frameToken || frameToken.hash !== mainToken.hash || wrapper.children.length > 128) return false;
+          containers.add(wrapper);
+          let fadeWrapper = null;
+          for (const chromeWrapper of wrapper.children) {
+            if (chromeWrapper.tagName !== 'DIV' || !chromeWrapper.hasAttribute('data-app-shell-main-content-top-fade')) continue;
+            if (fadeWrapper || chromeWrapper.children.length > 128) return false;
+            fadeWrapper = chromeWrapper; containers.add(chromeWrapper);
+            if (containers.size > 128) return false;
+            let fadeNode = null;
+            for (const decoration of chromeWrapper.children) {
+              if (decoration.tagName !== 'DIV' || decoration.getAttribute('aria-hidden') !== 'true' ||
+                  !String(decoration.className || '').split(/\s+/).some(token => token.startsWith('_MainContentTopFade_'))) continue;
+              if (fadeNode) return false;
+              fadeNode = decoration; nodes.add(decoration);
+              if (nodes.size > 128) return false;
+            }
+          }
+          continue;
+        }
+        if (wrapper.tagName === 'ARTICLE') continue;
         containers.add(wrapper);
         if (!children(wrapper)) return false;
       }
@@ -522,6 +543,20 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
         r.right > 0 && r.bottom > 0 && r.left < window.innerWidth && r.top < window.innerHeight;
     } catch { return false; }
   }
+  function playbackQuality() {
+    // Numeric diagnostics only, sampled by the existing status requests.
+    // No observers, extra frame callbacks, polling, or playback adaptations.
+    const sample = { videoTotalFrames: -1, videoDroppedFrames: -1, videoCorruptedFrames: -1 };
+    try {
+      if (typeof video.getVideoPlaybackQuality !== 'function') return sample;
+      const quality = video.getVideoPlaybackQuality();
+      for (const [source, target] of [['totalVideoFrames', 'videoTotalFrames'], ['droppedVideoFrames', 'videoDroppedFrames'], ['corruptedVideoFrames', 'videoCorruptedFrames']]) {
+        const value = quality && quality[source];
+        if (Number.isSafeInteger(value) && value >= 0 && value <= 2147483647) sample[target] = value;
+      }
+    } catch { /* Unsupported metrics are unknown, never evidence of zero drops. */ }
+    return sample;
+  }
   function status() {
     // An explicit status request must not describe a detached, replaced SPA
     // surface as playing. Check only our node and fixed shell structure.
@@ -535,7 +570,8 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
     const mediaTimeMs = Number.isFinite(now) && now >= 0 ? Math.min(86400000, Math.floor(now * 1000)) : 0;
     const wallpaperApplied = markerApplied && style.isConnected && document.getElementById(styleId) === style &&
       document.documentElement.getAttribute(marker) === 'v1';
-    return { attached, playing: playing && !video.paused && !documentHidden, disposed, code, layoutSupported, mediaReady,
+    return { ...playbackQuality(), videoWidth: video.videoWidth, videoHeight: video.videoHeight,
+      attached, playing: playing && !video.paused && !documentHidden, disposed, code, layoutSupported, mediaReady,
       wallpaperApplied, firstFrameConfirmed, prepared: mediaReady, revealed, manuallyPaused,
       probeOnly, documentHidden, stageVisible: stageVisible(), mediaTimeMs, betweenAppearances, dormant, memoryPressure,
       protocolVersion: 2, documentGeneration, mediaGeneration: generation, rendererClockMs: Math.floor(performance.now()), actualPhase: disposed || retired ? 'retired' : recoveryNeeded ? 'faulted' : dormant ? 'hibernating' : layoutSuspended ? 'paused' : code === 'resuming' ? 'resuming' : betweenAppearances ? 'gap' : manuallyPaused ? 'paused' : !mediaReady ? 'preparing' : !revealed ? 'prepared' : 'visible',

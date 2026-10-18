@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
@@ -266,8 +266,9 @@ namespace DragonLauncher
             internal readonly string Epoch,OperationId;
             internal readonly object Session;
             internal readonly double Started;
-            internal Request(string epoch,string operationId,object session,double started)
-            {Epoch=epoch;OperationId=operationId;Session=session;Started=started;}
+            internal readonly bool ObserveOnly;
+            internal Request(string epoch,string operationId,object session,double started,bool observeOnly)
+            {Epoch=epoch;OperationId=operationId;Session=session;Started=started;ObserveOnly=observeOnly;}
         }
         private string epoch=Guid.NewGuid().ToString("N"),operationId=Guid.NewGuid().ToString("N");
         private string document;
@@ -284,7 +285,11 @@ namespace DragonLauncher
         internal Request Begin(object session,double now)
         {
             if(terminal||session==null||Double.IsNaN(now)||Double.IsInfinity(now)||now<0)return null;
-            return new Request(epoch,operationId,session,now);
+            // Once this exact operation has prepared its decoder, subsequent
+            // polls are observations. Re-preparing every poll adds a mutation
+            // deadline to an already-ready session, including during the finale.
+            // Old proof selects a fresh read only; it never extends readiness.
+            return new Request(epoch,operationId,session,now,committed||HasPreparedOperation(session));
         }
         internal void InvalidateTarget()
         {
@@ -324,14 +329,29 @@ namespace DragonLauncher
             document=status.DocumentGeneration;mediaGeneration=status.MediaGeneration;
             accepted=status;acceptedRequest=request;return true;
         }
-        internal bool IsPrepared(object session,double now)
+        private bool HasPreparedOperation(object session)
+        {
+            BridgeStatus state=accepted;
+            // A failed observation acknowledgement does not undo a decoder's
+            // preparation. It still requires a fresh observation before use,
+            // not another prepare mutation. Explicit loss permits preparation.
+            return !terminal&&state!=null&&!state.Disabled&&acceptedRequest!=null&&
+                Object.ReferenceEquals(acceptedRequest.Session,session)&&state.ProtocolVersion==2&&
+                state.Prepared&&!state.CommitAccepted&&state.ActualPhase=="prepared"&&state.PrepareOperationId==operationId&&
+                state.DocumentGeneration==document&&state.MediaGeneration==mediaGeneration;
+        }
+        private bool HasPreparedEvidence(object session)
         {
             BridgeStatus state=accepted;
             return !terminal&&state!=null&&acceptedRequest!=null&&Object.ReferenceEquals(acceptedRequest.Session,session)&&
-                Age(acceptedRequest,state,now)<4000&&state.ProtocolVersion==2&&state.Health=="fresh"&&
+                state.ProtocolVersion==2&&state.Health=="fresh"&&
                 state.Prepared&&!state.CommitAccepted&&state.ActualPhase=="prepared"&&state.PrepareOperationId==operationId&&state.Disposition==2&&state.Ready&&!state.Disabled&&
                 (state.MediaCode==3||state.MediaCode==4)&&state.RefreshCode==1&&state.DiagnosticsVersion==1&&
                 state.LayoutSupported==true&&state.ProbeOnly==false&&state.Attached==true;
+        }
+        internal bool IsPrepared(object session,double now)
+        {
+            return HasPreparedEvidence(session)&&Age(acceptedRequest,accepted,now)<4000;
             // Prepared means a decoded buffer in this exact generation. A
             // splash-covered window need not have submitted a compositor frame.
             // WallpaperReadiness still requires fresh visible playback later.
@@ -403,6 +423,31 @@ namespace DragonLauncher
         internal bool Tripped {get;private set;}
         internal bool Record(bool healthy){if(Tripped)return false;failures=healthy?0:failures+1;if(failures<3)return false;Tripped=true;return true;}
     }
+    // Observe the existing sampler only. Fixed numeric records are not a
+    // responsiveness claim and do not change protection policy or cadence.
+    internal sealed class StartupResourceDiagnostics
+    {
+        private const long MaximumBytes=281474976710656L;
+        private long lastAt=-1;
+        private double lastCpu;
+        private int count;
+        private static long Bytes(long value){return value>=0&&value<=MaximumBytes?value:-1;}
+        internal string Record(long now,double cpu,long privateBytes,long availablePhysical,long totalPhysical,
+            long availableCommit,long totalCommit,int processors,bool lowMemory)
+        {
+            if(count>=64||now<0||processors<1||processors>4096||(lastAt>=0&&(now<lastAt||now-lastAt<2000)))return null;
+            long interval=lastAt<0?0:now-lastAt;
+            int cpuPermille=-1;
+            if(interval>0&&!Double.IsNaN(cpu)&&!Double.IsInfinity(cpu)&&cpu>=0&&
+                !Double.IsNaN(lastCpu)&&!Double.IsInfinity(lastCpu)&&lastCpu>=0&&cpu>=lastCpu)
+                cpuPermille=(int)Math.Min(1000,Math.Max(0,Math.Round((cpu-lastCpu)*1000000.0/(interval*(double)processors))));
+            lastAt=now;lastCpu=cpu;count++;
+            return String.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "Startup resource sample; elapsedMs={0}; intervalMs={1}; cpuPermille={2}; privateBytes={3}; availablePhysicalBytes={4}; totalPhysicalBytes={5}; availableCommitBytes={6}; totalCommitBytes={7}; logicalProcessors={8}; lowMemory={9}",
+                now,interval,cpuPermille,Bytes(privateBytes),Bytes(availablePhysical),Bytes(totalPhysical),Bytes(availableCommit),Bytes(totalCommit),processors,lowMemory?1:0);
+        }
+    }
+
     internal sealed class StartupResourceBreaker:System.IDisposable
     {
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
@@ -422,13 +467,16 @@ namespace DragonLauncher
         private readonly object sync=new object();
         private readonly StartupResourcePolicy policy=new StartupResourcePolicy(System.Environment.ProcessorCount);
         private readonly StartupSamplingHealth samplingHealth=new StartupSamplingHealth();
+        private readonly StartupResourceDiagnostics diagnostics=new StartupResourceDiagnostics();
         private readonly System.Diagnostics.Stopwatch clock=System.Diagnostics.Stopwatch.StartNew();
         private readonly System.Action<string> trip;
+        private readonly System.Action<string> sampleLog;
         private System.Threading.Timer timer;
         private System.IntPtr notification;
         private bool disposed,started;
         private bool sampleErrorLogged;
-        internal StartupResourceBreaker(System.Action<string> trip){this.trip=trip;}
+        internal StartupResourceBreaker(System.Action<string> trip):this(trip,value=>LauncherDiagnostics.Write("handoff-latest.log",value)){}
+        internal StartupResourceBreaker(System.Action<string> trip,System.Action<string> sampleLog){this.trip=trip;this.sampleLog=sampleLog;}
         internal void Start()
         {
             lock(sync){
@@ -440,31 +488,40 @@ namespace DragonLauncher
                 timer=new System.Threading.Timer(Sample,null,0,500);
             }
         }
-        private bool LowMemory()
+        private bool LowMemory(out MemoryStatus status,out bool memoryAvailable)
         {
+            status=new MemoryStatus{Length=(uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MemoryStatus))};memoryAvailable=false;
             bool low=false;
             bool notificationValid=notification!=System.IntPtr.Zero&&QueryMemoryResourceNotification(notification,out low);
             if(notificationValid&&low)return true;
-            var status=new MemoryStatus{Length=(uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MemoryStatus))};
-            if(GlobalMemoryStatusEx(ref status))return status.AvailablePhysical<1024UL*1024*1024 || status.AvailablePageFile<512UL*1024*1024;
+            if(GlobalMemoryStatusEx(ref status)){memoryAvailable=true;return status.AvailablePhysical<1024UL*1024*1024 || status.AvailablePageFile<512UL*1024*1024;}
             if(notificationValid)return false;
             throw new System.IO.IOException("startup-memory-observation-unavailable");
         }
         private void Sample(object ignored)
         {
-            string reason=null;
+            string reason=null,sample=null;
             if(!System.Threading.Monitor.TryEnter(sync))return;
             try{
                 if(disposed||policy.Reason!=null||samplingHealth.Tripped)return;
                 using(var process=System.Diagnostics.Process.GetCurrentProcess()){
-                    if(policy.Evaluate(clock.Elapsed.TotalSeconds,process.TotalProcessorTime.TotalSeconds,process.PrivateMemorySize64,LowMemory()))reason=policy.Reason;
+                    double now=clock.Elapsed.TotalSeconds,cpu=process.TotalProcessorTime.TotalSeconds;long bytes=process.PrivateMemorySize64;
+                    MemoryStatus memory;bool memoryAvailable;bool low=LowMemory(out memory,out memoryAvailable);
+                    if(policy.Evaluate(now,cpu,bytes,low))reason=policy.Reason;
                     samplingHealth.Record(true);
+                    try{sample=diagnostics.Record((long)(now*1000),cpu,bytes,memoryAvailable?(long)memory.AvailablePhysical:-1,
+                        memoryAvailable?(long)memory.TotalPhysical:-1,memoryAvailable?(long)memory.AvailablePageFile:-1,
+                        memoryAvailable?(long)memory.TotalPageFile:-1,System.Environment.ProcessorCount,low);}catch{}
                 }
             }catch(System.Exception e){
                 if(!sampleErrorLogged){sampleErrorLogged=true;LauncherDiagnostics.Write("handoff-latest.log","Startup resource sample unavailable: "+e.GetType().Name);}
                 if(samplingHealth.Record(false))reason="startup-resource-monitor-unavailable";
             }finally{System.Threading.Monitor.Exit(sync);}
             if(reason!=null){try{trip(reason);}catch(System.Exception e){LauncherDiagnostics.Write("handoff-latest.log","Startup resource trip dispatch failed: "+e.GetType().Name);}}
+            // Enter the existing bounded log queue outside the sampler lock
+            // and after protection dispatch. Reporting cannot trip the breaker
+            // or add work to per-frame UI callbacks.
+            if(sample!=null&&sampleLog!=null){try{sampleLog(sample);}catch{}}
         }
         public void Dispose()
         {

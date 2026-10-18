@@ -100,10 +100,12 @@ internal sealed class WallpaperSession {
     readonly Stopwatch preparationClock=Stopwatch.StartNew();volatile bool transportLost,targetLost;long observationStarted,observationReceived;MemoryPressureMonitor preparationMemory;
     readonly PreparationSnapshotRecorder preparationSnapshots=new PreparationSnapshotRecorder();
     readonly RotationSnapshotRecorder rotationSnapshots=new RotationSnapshotRecorder();
+    readonly RuntimeSnapshotRecorder runtimeSnapshots=new RuntimeSnapshotRecorder();
     void CheckPreparationResources(){if(preparationMemory!=null&&preparationMemory.IsLow())throw new HostFailure(74);}
     void SetPhase(int next){if(phase==next)return;phase=next;PreparationDiagnostics.Record(phase,preparationClock.ElapsedMilliseconds,0);}
     const string Key="window.__codexDragonWallpaperV1";
     const string RootReady="(() => ({rootReady:!!document.getElementById('root'),bodyReady:!!document.body}))()";
+    const string LayoutObservation="(() => {const s=window.__codexDragonWallpaperV1.status(),m=document.querySelectorAll('#root main[data-app-shell-main-surface=\"default\"]');let active=0;for(let i=0;i<Math.min(m.length,129);i++)if(!m[i].closest('[data-app-shell-active-page=\"false\"]'))active++;return Object.assign(s,{layoutWindowElectron:document.documentElement.getAttribute('data-codex-window-type')==='electron',layoutMainCount:Math.min(m.length,129),layoutActiveMainCount:active});})()";
     const string Preflight="(() => ({namespaceFree:!('__codexDragonWallpaperV1' in window),ownNodeCount:['codex-dragon-stage-v1','codex-dragon-file-v1','codex-dragon-style-v1'].filter(id=>document.getElementById(id)).length}))()";
     // The initial hidden stage belongs to the verified workspace surface and
     // is absolute. attach() later uses fixed positioning only for its 1px probe.
@@ -136,23 +138,26 @@ internal sealed class WallpaperSession {
     }
     // Only the two idempotent runtime observations use retries. Preparation,
     // reveal/commit, injection, cleanup and decoder recovery retain their limits.
+    void ClearTimedOutProof(){lock(state.Gate){state.Health="stale";state.Reason="response-timeout";state.Ready=state.Prepared=state.Revealed=state.CommitAccepted=false;state.ClearDiagnostics();state.ObservedAt=state.RendererSampleReceived=0;state.Sequence++;Monitor.PulseAll(state.Gate);}}
     Dictionary<string,object> RuntimeRead(string expression,long intent){
         string trustedSession=session;var total=Stopwatch.StartNew();
         for(int attempt=0;attempt<3;attempt++){
             if(transportLost||targetLost||cdp.Faulted||session!=trustedSession)throw new HostFailure(72);
             lock(state.Gate){if(state.Disabled||state.IntentRevision!=intent)return null;}
             int left=Deadline.Remaining(2600,total.ElapsedMilliseconds);if(left<=0)throw new HostFailure(37);
+            int requestBudget=Math.Min(750,left);var requestClock=Stopwatch.StartNew();
             try{
-                var result=Eval(expression,false,Math.Min(750,left));
+                var result=Eval(expression,false,requestBudget);
                 if(transportLost||targetLost||cdp.Faulted||session!=trustedSession)throw new HostFailure(72);
                 lock(state.Gate){if(state.Disabled||state.IntentRevision!=intent)return null;}
                 return result;
             }
             catch(HostFailure error){
+                PreparationDiagnostics.RecordRuntimeRequest(expression.IndexOf(".renewLease(",StringComparison.Ordinal)>=0?1:4,preparationClock.ElapsedMilliseconds,requestClock.ElapsedMilliseconds,requestBudget,error);
                 if(error.Code!=37)throw;
                 // A reply timeout is different from a terminal write/transport
                 // failure. No previous playback proof survives either one.
-                lock(state.Gate){state.Health="stale";state.Reason="response-timeout";state.Ready=state.Prepared=state.Revealed=state.CommitAccepted=false;state.ClearDiagnostics();state.ObservedAt=state.RendererSampleReceived=0;state.Sequence++;Monitor.PulseAll(state.Gate);}
+                ClearTimedOutProof();
                 if(transportLost||targetLost||cdp.Faulted||session!=trustedSession)throw;
                 lock(state.Gate){if(state.Disabled||state.IntentRevision!=intent)return null;}
                 if(attempt==2)throw;
@@ -170,27 +175,107 @@ internal sealed class WallpaperSession {
         throw new HostFailure(37);
     }
     bool Disabled {get{lock(state.Gate)return state.Disabled;}}
+    long lastReadinessSnapshot=-1;int lastReadinessPhase;
+    bool PreparationContextCurrent(string trustedSession,string generation){
+        if(transportLost||targetLost||cdp.Faulted||session!=trustedSession||state.DocumentGeneration!=generation)throw new HostFailure(72);
+        return !Disabled;
+    }
+    void WaitForPreparation(Stopwatch clock,int budget,int delay){
+        var wait=Stopwatch.StartNew();
+        while(!Disabled&&!transportLost&&!targetLost&&!cdp.Faulted){
+            int left=Math.Min(Deadline.Remaining(budget,clock.ElapsedMilliseconds),Deadline.Remaining(delay,wait.ElapsedMilliseconds));
+            if(left<=0)return;Thread.Sleep(Math.Min(50,left));
+        }
+    }
+    Dictionary<string,object> ReadPreparation(int kind,Stopwatch clock,int budget){
+        // This is a closed list of repeatable observations, NOT an arbitrary
+        // Runtime.evaluate retry wrapper. status() already supports polling:
+        // its owned-style cache and decoded-readiness housekeeping are guarded.
+        // Installation, attach, lease renewal and reveal/commit never use it.
+        if(kind<1||kind>3||budget<1||budget>12000)throw new HostFailure(36);
+        string trustedSession=session,generation=state.DocumentGeneration;
+        string expression=kind==1?RootReady:kind==2?LayoutObservation:Key+".status()";
+        for(;;){
+            if(!PreparationContextCurrent(trustedSession,generation))return null;
+            CheckPreparationResources();
+            int left=Deadline.Remaining(budget,clock.ElapsedMilliseconds);
+            if(left<=0)throw new HostFailure(kind==1?63:kind==2?66:68);
+            int requestBudget=Math.Min(1500,left);var request=Stopwatch.StartNew();int code=199,stage=0;
+            Dictionary<string,object> status=null;HostFailure retry=null;
+            try{status=Eval(expression,false,requestBudget);code=0;}
+            catch(HostFailure error){
+                code=100+error.Code;stage=error.TimeoutStage;
+                if(error.Code!=37||stage!=3)throw;retry=error;
+            }
+            finally{PreparationDiagnostics.RecordPreparationRead(phase,kind,request.ElapsedMilliseconds,requestBudget,code,stage,cdp);}
+            if(!PreparationContextCurrent(trustedSession,generation))return null;
+            CheckPreparationResources();
+            left=Deadline.Remaining(budget,clock.ElapsedMilliseconds);
+            if(retry!=null){
+                if(left<=0)throw retry;
+                WaitForPreparation(clock,budget,100);continue;
+            }
+            // A late success cannot renew the phase budget or serve as proof.
+            if(left<=0)throw new HostFailure(kind==1?63:kind==2?66:68);
+            if(kind!=1&&(Json.Text(status,"documentGeneration")!=generation||Json.Number(status,"protocolVersion")!=2))throw new HostFailure(70);
+            long elapsed=preparationClock.ElapsedMilliseconds;
+            if(lastReadinessPhase!=phase||lastReadinessSnapshot<0||elapsed-lastReadinessSnapshot>=1000){
+                lastReadinessPhase=phase;lastReadinessSnapshot=elapsed;
+                PreparationDiagnostics.RecordReadinessObservation(phase,elapsed,status,generation);
+            }
+            return status;
+        }
+    }
+    Dictionary<string,object> TargetRequest(int kind,Dictionary<string,object> parameters,int budget){
+        var request=Stopwatch.StartNew();int code=199,stage=0;
+        try{var result=cdp.Send(kind==1?"Target.getTargets":"Target.attachToTarget",parameters,null,budget);code=0;return result;}
+        catch(HostFailure error){code=100+error.Code;stage=error.TimeoutStage;throw;}
+        finally{PreparationDiagnostics.RecordTargetRequest(kind,request.ElapsedMilliseconds,budget,code,stage,cdp);}
+    }
+    void WaitForTarget(Stopwatch clock,int delay){
+        var wait=Stopwatch.StartNew();
+        // Bounded, non-spinning waits; do not consume control notifications.
+        while(!Disabled&&!cdp.Faulted){
+            int left=Math.Min(Deadline.Remaining(12000,clock.ElapsedMilliseconds),Deadline.Remaining(delay,wait.ElapsedMilliseconds));
+            if(left<=0)return;Thread.Sleep(Math.Min(50,left));
+        }
+    }
     void SelectTarget(){
         var clock=Stopwatch.StartNew();string id=null;
         while(clock.ElapsedMilliseconds<12000&&!Disabled){
             CheckPreparationResources();
-            var response=cdp.Send("Target.getTargets",Json.Obj(),null,2000);var values=Json.Get(response,"targetInfos") as IEnumerable;if(values==null)throw new HostFailure(62);
+            int left=Deadline.Remaining(12000,clock.ElapsedMilliseconds);if(left<=0)break;
+            Dictionary<string,object> response;
+            try{response=TargetRequest(1,Json.Obj(),Math.Min(2000,left));}
+            catch(HostFailure error){
+                // Only this idempotent discovery read can be replayed after a
+                // reply timeout. Pipe/write/protocol faults remain terminal.
+                if(error.Code!=37||error.TimeoutStage!=3||cdp.Faulted||Disabled||transportLost)throw;
+                if(Deadline.Remaining(12000,clock.ElapsedMilliseconds)<=0)throw;
+                WaitForTarget(clock,200);continue;
+            }
+            var values=Json.Get(response,"targetInfos") as IEnumerable;if(values==null)throw new HostFailure(62);
             int found=0;foreach(var value in values){var target=value as Dictionary<string,object>;if(target!=null&&AcceptedTarget(target)){found++;id=Json.Text(target,"targetId");}}
-            if(found>1)throw new HostFailure(62);if(found==1)break;Thread.Sleep(500);
+            if(found>1)throw new HostFailure(62);if(found==1)break;WaitForTarget(clock,500);
         }
-        if(id==null)throw new HostFailure(62);
-        var attached=cdp.Send("Target.attachToTarget",Json.Obj("targetId",id,"flatten",true),null,2000);session=Json.Text(attached,"sessionId");
+        CheckPreparationResources();
+        int remaining=Deadline.Remaining(12000,clock.ElapsedMilliseconds);
+        if(id==null||Disabled||transportLost||remaining<=0)throw new HostFailure(62);
+        // Attach mutates CDP state: issue it ONCE, using only the time left in
+        // the same startup budget. A timeout must never attach a second time.
+        var attached=TargetRequest(2,Json.Obj("targetId",id,"flatten",true),remaining);session=Json.Text(attached,"sessionId");
         if(!Regex.IsMatch(session??"","^[A-Za-z0-9_-]{1,128}$"))throw new HostFailure(62);
     }
     void Prepare(){
         CheckPreparationResources();
-        SetPhase(1);SelectTarget();SetPhase(2);var clock=Stopwatch.StartNew();bool rootReady=false;HostFailure lastGuard=null;
+        SetPhase(1);SelectTarget();SetPhase(2);var shellClock=Stopwatch.StartNew();var clock=Stopwatch.StartNew();bool rootReady=false;HostFailure lastGuard=null;
         while(clock.ElapsedMilliseconds<4000&&!Disabled){
             CheckPreparationResources();
-            try{var ready=Eval(RootReady,false,1500);if(Json.Bool(ready,"rootReady")&&Json.Bool(ready,"bodyReady")){rootReady=true;break;}}
+            try{var ready=ReadPreparation(1,clock,4000);if(ready==null)return;if(Json.Bool(ready,"rootReady")&&Json.Bool(ready,"bodyReady")){rootReady=true;break;}}
             catch(HostFailure e){if(e.Code<61000||e.Code>64999)throw;lastGuard=e;}
-            Thread.Sleep(200);
+            WaitForPreparation(clock,4000,200);
         }
+        if(Disabled)return;
         if(!rootReady&&lastGuard!=null)throw lastGuard;
         if(!rootReady)throw new HostFailure(63);
         SetPhase(3);
@@ -204,8 +289,16 @@ internal sealed class WallpaperSession {
         if(!Json.Bool(Eval(Style,false,1500),"styleAccepted"))throw new HostFailure(65);
         // Main shell layout can appear after #root. Only fixed structural
         // booleans are read; no UI text, screenshot or account data.
-        SetPhase(6);bool layout=false;clock.Restart();
-        do{CheckPreparationResources();layout=Json.Bool(Eval(Key+".status()",false,1500),"layoutSupported");if(layout||isolated||Disabled)break;Thread.Sleep(250);}while(clock.ElapsedMilliseconds<8000);
+        // Root (at most 4 s) and shell layout share their original 4+8 s
+        // allowance. Fast root readiness leaves slack for a busy shell;
+        // intervening mutations also spend this budget instead of resetting it.
+        SetPhase(6);bool layout=false;
+        while(shellClock.ElapsedMilliseconds<12000&&!Disabled){
+            var observed=ReadPreparation(2,shellClock,12000);if(observed==null)return;
+            layout=Json.Bool(observed,"layoutSupported");if(layout||isolated)break;
+            WaitForPreparation(shellClock,12000,250);
+        }
+        if(Disabled)return;
         if(!layout&&!isolated)throw new HostFailure(66);if(Disabled)return;
         SetPhase(7);var document=cdp.Send("DOM.getDocument",Json.Obj("depth",0),session,1500);
         long root=Json.Number(Json.Map(Json.Get(document,"root")),"nodeId");
@@ -233,7 +326,7 @@ internal sealed class WallpaperSession {
         Dictionary<string,object> status=null;
         for(;;){
             if(Disabled)return;CheckPreparationResources();int left=Deadline.Remaining(8500,clock.ElapsedMilliseconds);if(left<=0)throw new HostFailure(68);
-            status=Eval(Key+".status()",false,Math.Min(1500,left));
+            status=ReadPreparation(3,clock,8500);if(status==null)return;
             preparationSnapshots.Observe(status,state.DocumentGeneration,preparationClock.ElapsedMilliseconds);
             if(Disabled)return;CheckPreparationResources();
             left=Deadline.Remaining(8500,clock.ElapsedMilliseconds);if(left<=0)throw new HostFailure(68);
@@ -302,6 +395,7 @@ internal sealed class WallpaperSession {
             state.RendererClockMs=rendererClock;state.RendererSampleReceived=observationReceived;
         }
         rotationSnapshots.Observe(status,preparationClock.ElapsedMilliseconds);
+        if(phase>=12)runtimeSnapshots.Observe(status,state.DocumentGeneration,preparationClock.ElapsedMilliseconds);
     }
     void DisposeRenderer(){if(installed&&!disposed){SetPhase(13);Eval(Dispose,false,1500);var result=Eval(Cleanup,false,1500);if(Json.Bool(result,"apiPresent")||Json.Number(result,"ownNodeCount")!=0||Json.Bool(result,"markerPresent"))throw new HostFailure(69);disposed=true;}}
     internal static int Code(string text){switch(text){case "idle":return 0;case "loading":return 2;case "prepared":return 3;case "playing":case "reveal-pending":case "ready-hidden":case "resuming":return 4;case "paused":case "hibernating":return 5;case "disposed":return 6;case "unsupported-layout":return 7;default:return 8;}}
@@ -318,6 +412,13 @@ internal sealed class WallpaperSession {
         remaining=Math.Min(750,Deadline.Remaining(state.OperationTimeout,(long)((now-state.OperationStartedAt)*1000.0/Stopwatch.Frequency)));if(remaining<=0)return 0;
         return state.RendererClockMs+elapsed+remaining-1;
     }}
+    static string LeasedOperation(string action,string operation,string generation,long expires){
+        string deadline=expires.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return "(() => {const a="+Key+",expires="+deadline+",left=expires-performance.now();"+
+            "if(!(left>0&&left<=1500))return {ok:false,code:'expired-operation'};"+
+            "const lease=a.renewLease('"+generation+"');if(!lease||lease.ok!==true)return {ok:false,code:'lease-rejected'};"+
+            "return a."+action+"('"+operation+"',expires);})()";
+    }
     internal void Run(){
         MemoryPressureMonitor memory=null;
         try{
@@ -335,19 +436,48 @@ internal sealed class WallpaperSession {
                     bool low=memory.IsLow(),high=memory.IsHigh();pressure.Update(low,high,clock.ElapsedMilliseconds);
                     if(pressure.Pressured!=appliedPressure&&(pressure.Pressured?!Disabled:MutationAllowed(intent))){if(!Json.Bool(Eval(Key+".memoryPressure("+(pressure.Pressured?"true":"false")+")",false,1500),"ok"))throw new HostFailure(71);appliedPressure=pressure.Pressured;}
                 }
-                if(MutationAllowed(intent)){
+                if(MutationAllowed(intent)&&prepare==null&&commit==null){
                     var renewed=RuntimeRead(Key+".renewLease('"+state.DocumentGeneration+"')",intent);
                     if(renewed==null){if(refresh>0)state.CompleteRefresh(refresh,3);if(prepare!=null||commit!=null)state.CompleteOperation(operation,2);continue;}
                     if(!Json.Bool(renewed,"ok"))throw new HostFailure(70);
                 }
                 SetPhase(12);if(reveal&&MutationAllowed(intent)){var reply=Eval(Key+".reveal()",false,750);if(!Json.Bool(reply,"ok"))throw new HostFailure(70);}
                 else if(pause){var reply=Eval(Key+".pause()",false,1500);if(!Json.Bool(reply,"ok"))throw new HostFailure(70);}
-                int operationResult=1;
+                int operationResult=1;bool prepareReplyTimedOut=false;long prepareGeneration=0;
                 if(prepare!=null||commit!=null){int left=OperationRemaining(operation);if(left<50||!MutationAllowed(intent))operationResult=2;
-                    else{string action=prepare!=null?"prepare":"commit",op=prepare??commit;int budget;long expires=RendererExpiry(operation,out budget);if(expires==0||!Json.Bool(Eval(Key+"."+action+"('"+op+"',"+expires.ToString(System.Globalization.CultureInfo.InvariantCulture)+")",false,budget),"ok"))operationResult=2;else if(commit!=null){lock(state.Gate){state.RevealEverRequested=true;}}}}
+                    else{
+                        string action=prepare!=null?"prepare":"commit",op=prepare??commit,trustedSession=session,generation=state.DocumentGeneration;
+                        int budget;long expires=RendererExpiry(operation,out budget);
+                        if(expires==0||!MutationAllowed(intent))operationResult=2;
+                        else{
+                            if(transportLost||targetLost||cdp.Faulted)throw new HostFailure(72);
+                            // One guarded command shares the operation's original expiry.
+                            // A separate retried lease read could spend the whole 1 s
+                            // control budget before prepare/commit was ever sent.
+                            // Renewal and the operation are never replayed on timeout.
+                            Dictionary<string,object> reply=null;var requestClock=Stopwatch.StartNew();
+                            lock(state.Gate){prepareGeneration=state.MediaGeneration;}
+                            try{reply=Eval(LeasedOperation(action,op,generation,expires),false,budget);}
+                            catch(HostFailure error){
+                                PreparationDiagnostics.RecordRuntimeRequest(prepare!=null?2:3,preparationClock.ElapsedMilliseconds,requestClock.ElapsedMilliseconds,budget,error);
+                                // Preparation is confirmed by the following fresh status.
+                                // A missing reply is not a decoder failure. Never replay
+                                // this mutation or preserve its cached preparation proof.
+                                if(prepare==null||error.Code!=37||error.TimeoutStage!=3||transportLost||targetLost||cdp.Faulted||session!=trustedSession||state.DocumentGeneration!=generation||!MutationAllowed(intent))throw;
+                                prepareReplyTimedOut=true;operationResult=3;ClearTimedOutProof();
+                            }
+                            if(transportLost||targetLost||cdp.Faulted||session!=trustedSession||state.DocumentGeneration!=generation)throw new HostFailure(72);
+                            if(!prepareReplyTimedOut&&(!MutationAllowed(intent)||OperationRemaining(operation)<=0||!Json.Bool(reply,"ok")))operationResult=2;
+                            else if(commit!=null){lock(state.Gate){state.RevealEverRequested=true;}}
+                        }
+                    }}
                 var current=RuntimeRead(Key+".status()",intent);
                 if(current==null){if(refresh>0)state.CompleteRefresh(refresh,3);if(prepare!=null||commit!=null)state.CompleteOperation(operation,2);continue;}
                 UpdateStatus(current);
+                if(prepareReplyTimedOut&&MutationAllowed(intent)&&OperationRemaining(operation)>0&&
+                    Json.Text(current,"prepareOperationId")==prepare&&Json.Number(current,"mediaGeneration")==prepareGeneration&&
+                    Json.Bool(current,"prepared")&&Json.Bool(current,"mediaReady")&&(isolated||Json.Bool(current,"layoutSupported"))&&Json.Bool(current,"attached")&&!Json.Bool(current,"disposed")&&!Json.Bool(current,"commitAccepted")&&
+                    Json.Text(current,"actualPhase")=="prepared"&&Json.Text(current,"health")=="fresh")operationResult=1;
                 if(Json.Bool(current,"recoveryStable"))state.Recovery.HealthyCycle();
                 if(Json.Bool(current,"recoveryNeeded")&&MutationAllowed(intent)){
                     if(!state.Recovery.TryBegin()){Eval(Key+".retire('recovery-budget-exhausted')",false,750);throw new HostFailure(73);}

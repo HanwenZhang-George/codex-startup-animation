@@ -78,6 +78,36 @@ namespace DragonLauncher
             {return wasReady&&(!visible||minimized||cloaked);}
         }
 
+        internal enum HideAcknowledgement { Wait, RequestHide, Hidden, Expired, Minimized, LostOwnership }
+        internal sealed class HideAcknowledgementPolicy
+        {
+            internal const long BudgetMilliseconds=3000,RetryMilliseconds=500;
+            internal const int MaximumRequests=6;
+            private readonly long started;
+            private long lastRequest;
+            private HideAcknowledgement terminal=HideAcknowledgement.Wait;
+            internal int Requests {get;private set;}
+            internal HideAcknowledgementPolicy(long now){started=now;lastRequest=now;}
+            internal HideAcknowledgement Observe(long now,bool visible,bool minimized,bool owned)
+            {
+                if(terminal!=HideAcknowledgement.Wait)return terminal;
+                if(!owned)return terminal=HideAcknowledgement.LostOwnership;
+                if(minimized)return terminal=HideAcknowledgement.Minimized;
+                // The initial request owns one deadline. A later hidden sample
+                // must not revive a transaction that has already expired.
+                if(now<started||now-started>=BudgetMilliseconds)return terminal=HideAcknowledgement.Expired;
+                if(!visible)return terminal=HideAcknowledgement.Hidden;
+                if(Requests<MaximumRequests&&(Requests==0||now-lastRequest>=RetryMilliseconds)){
+                    Requests++;lastRequest=now;return HideAcknowledgement.RequestHide;
+                }
+                return HideAcknowledgement.Wait;
+            }
+        }
+        internal static bool NeedsPreparationShow(bool alreadyVisible,int hideRequests)
+        {return !alreadyVisible||hideRequests>0;}
+        internal static bool NeedsHideCompensation(int hideRequests,bool showOrdered)
+        {return hideRequests>0&&!showOrdered;}
+
         [StructLayout(LayoutKind.Sequential)]
         private struct NativePoint { public int X, Y; }
 
@@ -121,6 +151,8 @@ namespace DragonLauncher
             private int phase;
             private bool changed, captured, committed, disposed, restored, wasReady, transitionSuppressionAttempted;
             private readonly ReadinessLossPolicy readinessLoss=new ReadinessLossPolicy();
+            private HideAcknowledgementPolicy hideAcknowledgement;
+            private bool hideShowOrdered;
             private NativeRestoreGuard.Lease recovery;
             internal bool RecoveryArmed {get{return !disposed&&!Failed&&recovery!=null&&recovery.Armed&&recovery.Available&&recovery.Owned;}}
             internal bool CanSuppressTransitions {get{return !transitionSuppressionAttempted&&RecoveryArmed&&recovery.Record.Transition==0;}}
@@ -275,12 +307,20 @@ namespace DragonLauncher
                         // guard is arming. Retain only its existing foreground
                         // in our cover; never steal from an unrelated app.
                         if(IsForegroundTarget(target)){film.Activate();film.Focus();}
-                        changed=true;if(!ShowWindowAsync(target,0)){Fail("Cannot request target hide.");return false;}
-                        phase=0;return false;
+                        changed=true;hideAcknowledgement=new HideAcknowledgementPolicy(CacheClock.ElapsedMilliseconds);phase=0;
                     }
                     if(phase==0)
                     {
-                        if(IsWindowVisible(target))return false;
+                        // Electron can show itself again after the first queued
+                        // hide. Observe acknowledgement and retry only that
+                        // idempotent request, with an independent short bound.
+                        HideAcknowledgement hide=hideAcknowledgement.Observe(CacheClock.ElapsedMilliseconds,
+                            IsWindowVisible(target),IsIconic(target),RecoveryArmed);
+                        if(hide==HideAcknowledgement.Minimized){Fail("Target minimized during hide acknowledgement.");return false;}
+                        if(hide==HideAcknowledgement.LostOwnership){Fail("Native hide acknowledgement lost recovery ownership.");return false;}
+                        if(hide==HideAcknowledgement.Expired){Fail("Native hide acknowledgement timed out; budgetMs=3000; requests="+hideAcknowledgement.Requests);return false;}
+                        if(hide==HideAcknowledgement.RequestHide){if(!ShowWindowAsync(target,0))Fail("Cannot request target hide.");return false;}
+                        if(hide!=HideAcknowledgement.Hidden)return false;
                         NativePlacement compact=original;
                         compact.Flags=4;compact.ShowCommand=0;compact.NormalPosition=desired;
                         if((WindowStyle(target,GwlExStyle)&WsExToolWindow)==0)
@@ -321,9 +361,13 @@ namespace DragonLauncher
                             "; alreadyVisible="+alreadyVisible+
                             "; target="+applied.Left+","+applied.Top+","+applied.Right+","+applied.Bottom+
                             "; cover="+cover.Left+","+cover.Top+","+cover.Right+","+cover.Bottom);
-                        // Electron may show itself after its hidden placement
-                        // has settled. Accept a safely covered window as-is.
-                        if(!alreadyVisible&&!ShowWindowAsync(target,4)){Fail("Cannot reveal confirmed compact placement.");return false;}
+                        // A visible exact rectangle is safe, but another one of
+                        // our queued hides can still follow an app self-show.
+                        // Order one final nonactivating show after all requests.
+                        if(NeedsPreparationShow(alreadyVisible,hideAcknowledgement==null?0:hideAcknowledgement.Requests)){
+                            if(!ShowWindowAsync(target,4)){Fail("Cannot reveal confirmed compact placement.");return false;}
+                            hideShowOrdered=true;
+                        }
                         if(!CompleteInitialHiddenLease(target)){Fail("Cannot release initial hidden-window lease.");return false;}
                         phase=1;return false;
                     }
@@ -404,7 +448,18 @@ namespace DragonLauncher
                     previous=EnterPhysicalCoordinates();
                     int cloaked;
                     bool isCloaked=DwmGetInt(target,Cloaked,out cloaked,sizeof(int))==0&&cloaked!=0;
-                    if(ReadinessLossPolicy.PreservePresentation(wasReady,IsWindowVisible(target),IsIconic(target),isCloaked))
+                    bool minimized=IsIconic(target);
+                    bool pendingHide=hideAcknowledgement!=null&&NeedsHideCompensation(hideAcknowledgement.Requests,hideShowOrdered);
+                    if(pendingHide){
+                        // IsWindowVisible can still describe the pre-request
+                        // state while SW_HIDE is queued. Queue compensation
+                        // after it, even while visible, before releasing the
+                        // durable lease. Neither command activates the target.
+                        if(recovery==null||!recovery.Armed||!recovery.Owned||
+                            !ShowWindowAsync(target,minimized?7:8))return;
+                        hideShowOrdered=true;
+                    }
+                    if((pendingHide&&minimized)||ReadinessLossPolicy.PreservePresentation(wasReady,IsWindowVisible(target),minimized,isCloaked))
                     {
                         // This waiver is evaluated only during terminal cleanup,
                         // never during the recovery grace. A transient hide that
