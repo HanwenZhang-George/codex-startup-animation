@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -610,12 +610,6 @@ namespace DragonLauncher
         private BridgeClientIdentity(uint pid,long created,string executable)
         {Pid=pid;Created=created;Executable=executable;}
 
-        [DataContract] private sealed class OfficialPin
-        {
-            [DataMember(Name="version",IsRequired=true)] public int Version {get;set;}
-            [DataMember(Name="packageFullName",IsRequired=true)] public string PackageFullName {get;set;}
-            [DataMember(Name="executableSha256",IsRequired=true)] public string Sha256 {get;set;}
-        }
         private static string RegularFile(string file)
         {
             string full=Path.GetFullPath(file);
@@ -625,30 +619,31 @@ namespace DragonLauncher
                 if((File.GetAttributes(cursor)&FileAttributes.ReparsePoint)!=0)throw new InvalidDataException("official-file-link-rejected");
             return full;
         }
-        private static string PinnedExecutable(string root)
+        private static void RequireAutomaticPolicy(string root)
         {
             string config=RegularFile(Path.Combine(Path.GetFullPath(root),"wallpaper-host-config.json"));
-            OfficialPin pin;
+            Dictionary<string,object> policy;
             using(var input=new FileStream(config,FileMode.Open,FileAccess.Read,FileShare.Read))
             {
                 if(input.Length==0 || input.Length>16384)throw new InvalidDataException("official-config-size-rejected");
-                // Windows PowerShell 5.1 may write a single UTF-8 BOM. The
-                // JSON stream reader does not consume it; accept only that
-                // exact prefix and leave every other byte to the same parser.
-                int first=input.ReadByte(),second=input.ReadByte(),third=input.ReadByte();
-                input.Position=first==0xEF && second==0xBB && third==0xBF ? 3 : 0;
-                pin=(OfficialPin)new DataContractJsonSerializer(typeof(OfficialPin)).ReadObject(input);
+                using(var reader=new StreamReader(input,new UTF8Encoding(false,true),true))
+                    policy=new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=16384,RecursionLimit=16}.DeserializeObject(reader.ReadToEnd()) as Dictionary<string,object>;
             }
-            if(pin.Version!=1 || pin.Sha256==null || !System.Text.RegularExpressions.Regex.IsMatch(pin.Sha256,@"\A[0-9a-fA-F]{64}\z"))
-                throw new InvalidDataException("official-pin-rejected");
-            string executable=BridgeNative.RegisteredExecutable(pin.PackageFullName);
-            if(executable==null)throw new InvalidDataException("official-package-not-registered");
-            executable=RegularFile(executable);
-            string hash;
-            using(var input=new FileStream(executable,FileMode.Open,FileAccess.Read,FileShare.Read,65536,FileOptions.SequentialScan))
-            using(var sha=SHA256.Create())hash=BitConverter.ToString(sha.ComputeHash(input)).Replace("-","");
-            if(!string.Equals(hash,pin.Sha256,StringComparison.OrdinalIgnoreCase))throw new InvalidDataException("official-executable-hash-rejected");
-            return executable;
+            object version,family,mode;
+            if(policy==null || !policy.TryGetValue("version",out version) || !(version is int) || (int)version!=2 ||
+                !policy.TryGetValue("officialFamilyName",out family) || !(family is string) || (string)family!="OpenAI.Codex_2p2nqsd0c76g0" ||
+                !policy.TryGetValue("officialIdentityMode",out mode) || !(mode is string) || (string)mode!="registered-signed" ||
+                policy.ContainsKey("packageFullName") || policy.ContainsKey("executableSha256"))
+                throw new InvalidDataException("official-policy-rejected");
+        }
+        private static string VerifiedProcessExecutable(string root,uint pid,long created)
+        {
+            RequireAutomaticPolicy(root);
+            if(pid==0||pid>Int32.MaxValue||created<=0)throw new InvalidDataException("official-process-rejected");
+            // The authenticated Host already committed this child. Resolve its
+            // exact generation; an update must not retarget the current session.
+            using(var identity=CodexDragon.Official.OfficialIdentityResolver.VerifyProcess((int)pid,created))
+                return identity.Executable;
         }
         internal bool Matches(uint pid,long created,string executable)
         {return SameSnapshot(Pid,Created,Executable,pid,created,executable);}
@@ -674,7 +669,7 @@ namespace DragonLauncher
         // Read-only validation is also used by the isolated test executable.
         // It cannot mint a window-control capability without a bridge session.
         internal static bool ValidateOfficialProcess(string root,uint pid,long created)
-        {try{return IsLiveInstance(pid,created,PinnedExecutable(root));}catch{return false;}}
+        {try{return IsLiveInstance(pid,created,VerifiedProcessExecutable(root,pid,created));}catch{return false;}}
         internal static BridgeClientIdentity Attest(Settings settings,string root,BridgeSession session,Action<string> log=null)
         {
             var clock=Stopwatch.StartNew();int phase=1,reason=0;Exception failure=null;
@@ -689,7 +684,7 @@ namespace DragonLauncher
                 // handle; its own identity must still be alive at attestation.
                 phase=3;if(!session.MatchesHost(status.HostPid,status.HostCreated)){reason=3;return null;}
                 phase=4;
-                string executable=PinnedExecutable(root);
+                string executable=VerifiedProcessExecutable(root,(uint)status.CodexPid,status.CodexCreated);
                 phase=5;if(!IsLiveInstanceCore((uint)status.CodexPid,status.CodexCreated,executable)){reason=4;return null;}
                 phase=6;
                 return new BridgeClientIdentity((uint)status.CodexPid,status.CodexCreated,executable);
@@ -701,7 +696,7 @@ namespace DragonLauncher
                     case "official-file-unavailable":reason=6;break;
                     case "official-file-link-rejected":reason=7;break;
                     case "official-config-size-rejected":reason=8;break;
-                    case "official-pin-rejected":reason=9;break;
+                    case "official-policy-rejected":reason=9;break;
                     case "official-package-not-registered":reason=10;break;
                     case "official-executable-hash-rejected":reason=11;break;
                 }}return null;}
@@ -732,40 +727,6 @@ namespace DragonLauncher
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] private static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder name,ref uint size);
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] private static extern int GetApplicationUserModelId(IntPtr process,ref uint length,StringBuilder appId);
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] private static extern int GetPackageFamilyName(IntPtr process,ref uint length,StringBuilder family);
-        [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] private static extern int GetPackagesByPackageFamily(string family,ref uint count,IntPtr names,ref uint bufferLength,IntPtr buffer);
-        [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] private static extern int GetPackagePathByFullName(string name,ref uint length,StringBuilder path);
-        private static List<string> RegisteredPackageNames()
-        {
-            const string family="OpenAI.Codex_2p2nqsd0c76g0";
-            var result=new List<string>();uint count=0,chars=0;
-            if(GetPackagesByPackageFamily(family,ref count,IntPtr.Zero,ref chars,IntPtr.Zero)!=122 || count==0 || count>32 || chars<2 || chars>32768)return result;
-            IntPtr names=Marshal.AllocHGlobal(checked((int)count*IntPtr.Size)),buffer=Marshal.AllocHGlobal(checked((int)chars*2));
-            try
-            {
-                uint capacity=count;
-                if(GetPackagesByPackageFamily(family,ref count,names,ref chars,buffer)!=0 || count>capacity)return result;
-                for(int i=0;i<count;i++)
-                {
-                    string name=Marshal.PtrToStringUni(Marshal.ReadIntPtr(names,i*IntPtr.Size));
-                    if(name!=null && System.Text.RegularExpressions.Regex.IsMatch(name,@"\AOpenAI\.Codex_[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+_(?:x64|x86|arm64)__2p2nqsd0c76g0\z"))result.Add(name);
-                }
-            }
-            finally{Marshal.FreeHGlobal(names);Marshal.FreeHGlobal(buffer);}
-            return result;
-        }
-        private static string ExecutableForRegisteredName(string name)
-        {
-            uint length=0;if(GetPackagePathByFullName(name,ref length,null)!=122 || length<2 || length>32768)return null;
-            var path=new StringBuilder((int)length);
-            if(GetPackagePathByFullName(name,ref length,path)!=0)return null;
-            return Path.GetFullPath(Path.Combine(path.ToString(),"app","ChatGPT.exe"));
-        }
-        internal static string RegisteredExecutable(string fullName)
-        {
-            if(fullName==null)return null;
-            foreach(string name in RegisteredPackageNames())if(string.Equals(name,fullName,StringComparison.Ordinal))return ExecutableForRegisteredName(name);
-            return null;
-        }
         internal static bool IsAlive(IntPtr process){uint code;return GetExitCodeProcess(process,out code) && code==259;}
         internal static bool HasExited(IntPtr process){return process!=IntPtr.Zero && WaitForSingleObject(process,0)==0;}
         internal static bool CreationTime(IntPtr process,out long created){long exited,kernel,user;return GetProcessTimes(process,out created,out exited,out kernel,out user);}
@@ -783,22 +744,19 @@ namespace DragonLauncher
         }
         internal static uint ExistingOfficialProcess(string appId)
         {
+            if(string.Equals(appId,BridgeClientIdentity.OfficialAppId,StringComparison.OrdinalIgnoreCase)){
+                var snapshots=CodexDragon.Official.OfficialIdentityResolver.FindRunning();
+                try{return snapshots.Length==0?0:(uint)snapshots[0].Pid;}
+                finally{foreach(var snapshot in snapshots)snapshot.Dispose();}
+            }
             int ownSession;using(var own=Process.GetCurrentProcess())ownSession=own.SessionId;
             string family=appId.Split('!')[0];
-            var registeredExecutables=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if(string.Equals(appId,BridgeClientIdentity.OfficialAppId,StringComparison.OrdinalIgnoreCase))
-                foreach(string name in RegisteredPackageNames())
-                {string path=ExecutableForRegisteredName(name);if(path!=null)registeredExecutables.Add(path);}
             foreach(Process process in Process.GetProcesses())using(process)try {
                 if(process.SessionId!=ownSession || !IsAlive(process.Handle))continue;
                 uint length=512;var actual=new StringBuilder(512);
                 if(GetApplicationUserModelId(process.Handle,ref length,actual)==0 && string.Equals(actual.ToString(),appId,StringComparison.OrdinalIgnoreCase))return (uint)process.Id;
                 length=512;actual.Clear();
                 if(GetPackageFamilyName(process.Handle,ref length,actual)==0 && string.Equals(actual.ToString(),family,StringComparison.OrdinalIgnoreCase))return (uint)process.Id;
-                // Duplicate-launch prevention only. This broad registered-path
-                // check never grants HWND control; that needs the exact bridge
-                // capability above, including creation time and pinned hash.
-                if(registeredExecutables.Contains(ImagePath(process.Handle)))return (uint)process.Id;
             }catch{ /* inaccessible/unrelated processes are never touched */ }
             return 0;
         }

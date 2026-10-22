@@ -7,6 +7,7 @@ $scriptDirectory=Split-Path -Parent $PSCommandPath
 if([string]::IsNullOrWhiteSpace($Source)){$Source=Join-Path (Split-Path -Parent $scriptDirectory) 'wallpaper-host-src'}
 $files=Get-ChildItem -LiteralPath $Source -Filter '*.cs' | ForEach-Object FullName
 if($files.Count -ne 5){throw 'Expected five host source files'}
+$files=@($files)+@(Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($Source))) 'src\OfficialIdentity.cs')
 [void][IO.Directory]::CreateDirectory($OutputDirectory)
 $outputRoot=[IO.Path]::GetFullPath($OutputDirectory)
 $assembly=Join-Path $outputRoot 'StartupTargetSelectionTests.exe'

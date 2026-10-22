@@ -1,7 +1,17 @@
 Codex Dragon — community startup animation and dynamic wallpaper
-Portable V34-r9 memory policy candidate for Windows 10/11 x64
+Portable V34-r10 automatic-update adaptation test candidate for Windows 10/11 x64
 
 STATUS
+This test candidate starts from the freshly downloaded public R9 ZIP. It ports
+the verified local official-identity and hidden/maximized-window handoff fixes.
+The official Store executable is discovered from registered package metadata,
+validated by signature, and held through child creation. The handoff then checks
+that actual process and creation time instead of reselecting a newer version.
+Generated configuration stores the identity policy, not a fixed official version
+or executable hash. Ordinary package version/path updates are resolved on launch.
+This candidate has NOT been published; a separate-PC playback test is pending.
+The existing public release/download URLs will be retained after approval.
+
 This candidate corrects a second memory gate in wallpaper preparation. A Windows
 low-physical-memory notification or a low RAM reading no longer disables playback
 when the current process still has sufficient available commit. Critical commit
@@ -103,11 +113,16 @@ WHAT IS PRESERVED
 - All video pixels/frame rates remain the delivered originals.
 
 PORTABILITY AND UPDATES
-Launch.exe discovers the registered official Store package on the target PC,
-verifies its OpenAI signature and writes local media paths plus the executable
-hash to wallpaper-host-config.json. It rechecks registration on subsequent starts
-so this package contains no fixed username, drive, workspace or official version.
-A currently running registered package is preferred for the warm-start flow.
+The launcher and host share the same registered-and-signed identity resolver.
+On cold start, the host resolves the current registered Store package and its
+manifest executable, verifies its OpenAI signature, and validates the child it
+actually created. During handoff and warm start, verification binds to the exact
+process and its creation time, including a still-registered older running version.
+wallpaper-host-config.json is generated locally with media paths and policy version
+2. It does not pin the official package version or executable hash. It is not
+shipped in the ZIP and must not be copied from another machine or old install.
+An update during discovery fails safely instead of trusting an unverified path.
+Ordinary signed Store version/path updates do not require manually editing a hash.
 This does not prove future Codex layouts are compatible. If a future update
 changes the DOM or transport, the wallpaper may decline to attach. Use the official
 app normally and report the failure; do not disable signature/path checks.

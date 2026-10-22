@@ -20,8 +20,6 @@ namespace CodexDragonPublic {
         const string Family="OpenAI.Codex_2p2nqsd0c76g0";
         const string AppId=Family+"!App";
         static readonly string Root=Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar);
-        [DllImport("kernel32.dll",CharSet=CharSet.Unicode)]
-        static extern int GetPackagesByPackageFamily(string family,ref uint count,IntPtr names,ref uint bufferLength,IntPtr buffer);
 
         [STAThread] static int Main(string[] args) {
             bool quiet=args.Length==1 && (args[0]=="--configure" || args[0]=="--check");
@@ -37,7 +35,7 @@ namespace CodexDragonPublic {
                         }
                         bool preview=args.Length==1 && args[0]=="--preview";
                         bool check=args.Length==1 && args[0]=="--check";
-                        var prepare=Task.Run(()=>Prepare(check,preview));
+                        var prepare=Task.Run(()=>Prepare(check,preview,quiet&&!check));
                         if(!prepare.Wait(20000))throw new InvalidOperationException("PUBLIC_PREPARATION_TIMEOUT");
                         bool replay=prepare.GetAwaiter().GetResult();
                         if(quiet)return 0;
@@ -95,7 +93,7 @@ namespace CodexDragonPublic {
             catch(FileNotFoundException){return false;}
             catch(DirectoryNotFoundException){return false;}
         }
-        internal static bool Prepare(bool readOnly,bool preview) {
+        internal static bool Prepare(bool readOnly,bool preview,bool configure=false) {
             if(!Environment.Is64BitOperatingSystem || Environment.OSVersion.Version.Major<10)
                 throw new InvalidOperationException("PUBLIC_UNSUPPORTED_WINDOWS");
             foreach(var pin in BootstrapPins.Code) {
@@ -112,15 +110,27 @@ namespace CodexDragonPublic {
             }
             ValidateLauncher();
             if(preview)return false; // Preview never discovers, starts or controls Codex.
-            string package=FindOfficialPackage();
-            string exe=Files.Regular(Path.Combine(Native.PackagePath(package),"app","ChatGPT.exe"));
-            string hash=Files.Hash(exe);Native.VerifyOfficial(exe,hash);
-            bool replay=IsRunning(exe);
+            bool replay;
+            try {
+                replay=CodexDragon.Official.OfficialIdentityResolver.IsOfficialRunning();
+                // Validation/install modes remain read-only with respect to the
+                // official client. A real cold launch selects its identity only
+                // in Host, after taking the launch lock, avoiding stale pins.
+                if(readOnly||configure)using(var identity=CodexDragon.Official.OfficialIdentityResolver.ResolveCurrent()){
+                    string app=Path.GetDirectoryName(identity.Executable);
+                    if(!File.Exists(Path.Combine(app,"chrome.dll"))||!File.Exists(Path.Combine(app,"resources","app.asar")))
+                        throw new InvalidOperationException("PUBLIC_OFFICIAL_RUNTIME_UNSUPPORTED");
+                }
+            }catch(Exception error){
+                if(error is InvalidOperationException&&error.Message=="PUBLIC_OFFICIAL_RUNTIME_UNSUPPORTED")throw;
+                int diagnostic=CodexDragon.Official.OfficialIdentityResolver.DiagnosticCode(error);
+                throw new InvalidOperationException(diagnostic==10?"PUBLIC_OFFICIAL_DISCOVERY_FAILED":"PUBLIC_OFFICIAL_IDENTITY_REJECTED");
+            }
             if(readOnly)return replay;
             var ambient=BootstrapPins.Media.Single(p=>p.Path.EndsWith("/dragon-wallpaper-ambient-2k-144fps.mp4",StringComparison.Ordinal));
             var alternate=BootstrapPins.Media.Single(p=>p.Path.EndsWith("/dragon-wallpaper-particles-1440p48.mp4",StringComparison.Ordinal));
             var config=new Dictionary<string,object> {
-                {"version",1},{"packageFullName",package},{"executableSha256",hash},
+                {"version",2},{"officialFamilyName",Family},{"officialIdentityMode","registered-signed"},
                 {"rendererSha256",BootstrapPins.Code["renderer.js"]},
                 {"mediaPath",Path.Combine(Root,ambient.Path)},{"mediaBytes",ambient.Bytes},{"mediaSha256",ambient.Sha256},
                 {"wallpaperEnabled",true},
@@ -143,41 +153,6 @@ namespace CodexDragonPublic {
                 string relative=(string)launcher.Element(name);
                 if(!BootstrapPins.Media.Any(p=>p.Path==relative))throw new InvalidOperationException("PUBLIC_LAUNCHER_ASSET_INVALID");
             }
-        }
-        internal static string FindOfficialPackage() {
-            uint count=0,chars=0;
-            if(GetPackagesByPackageFamily(Family,ref count,IntPtr.Zero,ref chars,IntPtr.Zero)!=122 || count==0 || count>32 || chars>32768)
-                throw new InvalidOperationException("PUBLIC_OFFICIAL_CODEX_NOT_INSTALLED");
-            IntPtr names=Marshal.AllocHGlobal(checked((int)count*IntPtr.Size));
-            IntPtr buffer=Marshal.AllocHGlobal(checked((int)chars*2));
-            var candidates=new List<KeyValuePair<Version,string>>();
-            try {
-                if(GetPackagesByPackageFamily(Family,ref count,names,ref chars,buffer)!=0)
-                    throw new InvalidOperationException("PUBLIC_PACKAGE_ENUMERATION_FAILED");
-                for(int i=0;i<count;i++) {
-                    string package=Marshal.PtrToStringUni(Marshal.ReadIntPtr(names,i*IntPtr.Size));
-                    string[] parts=(package??"").Split('_');Version version;
-                    if(parts.Length==5 && parts[0]=="OpenAI.Codex" && parts[2]=="x64" && parts[4]=="2p2nqsd0c76g0" && Version.TryParse(parts[1],out version))
-                        candidates.Add(new KeyValuePair<Version,string>(version,package));
-                }
-            }finally {Marshal.FreeHGlobal(names);Marshal.FreeHGlobal(buffer);}
-            string newest=null;
-            foreach(var candidate in candidates.OrderByDescending(p=>p.Key)) {
-                string path=Path.Combine(Native.PackagePath(candidate.Value),"app","ChatGPT.exe");
-                if(!File.Exists(path))continue;
-                if(IsRunning(path))return candidate.Value;
-                if(newest==null)newest=candidate.Value;
-            }
-            if(newest!=null)return newest;
-            throw new InvalidOperationException("PUBLIC_SUPPORTED_CODEX_EXECUTABLE_NOT_FOUND");
-        }
-        static bool IsRunning(string exe) {
-            using(var self=Process.GetCurrentProcess()) {
-                foreach(var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe)))using(process) {
-                    try {if(!process.HasExited && process.SessionId==self.SessionId && String.Equals(process.MainModule.FileName,exe,StringComparison.OrdinalIgnoreCase))return true;}catch{}
-                }
-            }
-            return false;
         }
         static void WriteConfig(string value) {
             string path=Path.Combine(Root,"wallpaper-host-config.json");

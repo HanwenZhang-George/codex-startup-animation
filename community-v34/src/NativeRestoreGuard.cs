@@ -23,6 +23,7 @@ internal sealed class NativeRestoreGuard:IDisposable {
     [StructLayout(LayoutKind.Sequential)] internal struct Point {internal int X,Y;}
     [StructLayout(LayoutKind.Sequential)] internal struct Rect {internal int Left,Top,Right,Bottom;}
     [StructLayout(LayoutKind.Sequential)] internal struct Placement {internal uint Length,Flags,Show;internal Point Min,Max;internal Rect Normal;}
+    [StructLayout(LayoutKind.Sequential)] struct MonitorInfo {internal int Size;internal Rect Monitor,Work;internal uint Flags;}
     [DataContract] internal sealed class Record {
         [DataMember] public string Token {get;set;}
         [DataMember] public long Window {get;set;}
@@ -38,6 +39,11 @@ internal sealed class NativeRestoreGuard:IDisposable {
         [DataMember] public int ExpectedTop {get;set;}
         [DataMember] public int ExpectedRight {get;set;}
         [DataMember] public int ExpectedBottom {get;set;}
+        [DataMember] public bool ExpectedNormalCaptured {get;set;}
+        [DataMember] public int ExpectedNormalLeft {get;set;}
+        [DataMember] public int ExpectedNormalTop {get;set;}
+        [DataMember] public int ExpectedNormalRight {get;set;}
+        [DataMember] public int ExpectedNormalBottom {get;set;}
         [DataMember] public int Transition {get;set;}
         [DataMember] public int ScreenLeft {get;set;}
         [DataMember] public int ScreenTop {get;set;}
@@ -58,6 +64,9 @@ internal sealed class NativeRestoreGuard:IDisposable {
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr w);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr w);
     [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr w);
+    [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr w,int index);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromRect(ref Rect r,uint flags);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr monitor,ref MonitorInfo info);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr w,out uint pid);
     [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr w,ref Placement p);
     [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr w,ref Placement p);
@@ -109,6 +118,16 @@ internal sealed class NativeRestoreGuard:IDisposable {
         Record record;
         using(var process=Process.GetProcessById((int)pid))record=new Record{Token=Guid.NewGuid().ToString("N"),Window=window.ToInt64(),Pid=(int)pid,Created=process.StartTime.ToUniversalTime().ToFileTimeUtc(),Exe=process.MainModule.FileName,
             Left=p.Normal.Left,Top=p.Normal.Top,Right=p.Normal.Right,Bottom=p.Normal.Bottom,Show=p.Show,ExpectedLeft=l,ExpectedTop=t,ExpectedRight=r,ExpectedBottom=b,Transition=-1};
+        // WINDOWPLACEMENT normal coordinates use monitor-workspace coordinates
+        // for a normal top-level window. Capture them before the mutation, so
+        // later monitor/taskbar changes cannot expand rollback ownership.
+        Rect normal=new Rect{Left=l,Top=t,Right=r,Bottom=b};bool normalCaptured=true;
+        if((GetWindowLongPtr(window,-20).ToInt64()&0x80L)==0){
+            MonitorInfo monitor=new MonitorInfo{Size=Marshal.SizeOf(typeof(MonitorInfo))};IntPtr screenMonitor=MonitorFromRect(ref normal,2);
+            if(screenMonitor==IntPtr.Zero||!GetMonitorInfo(screenMonitor,ref monitor))normalCaptured=false;
+            else{int dx=monitor.Monitor.Left-monitor.Work.Left,dy=monitor.Monitor.Top-monitor.Work.Top;normal.Left+=dx;normal.Right+=dx;normal.Top+=dy;normal.Bottom+=dy;}
+        }
+        record.ExpectedNormalCaptured=normalCaptured;record.ExpectedNormalLeft=normal.Left;record.ExpectedNormalTop=normal.Top;record.ExpectedNormalRight=normal.Right;record.ExpectedNormalBottom=normal.Bottom;
         Rect screen;if(!GetWindowRect(window,out screen))return null;
         record.ScreenLeft=screen.Left;record.ScreenTop=screen.Top;record.ScreenRight=screen.Right;record.ScreenBottom=screen.Bottom;
         int transition;if(GetTransition(window,3,out transition,4)==0)record.Transition=transition;
@@ -167,13 +186,18 @@ internal sealed class NativeRestoreGuard:IDisposable {
     internal static bool Restore(Record r){
         IntPtr dpi=Physical();try{return RestorePhysical(r);}finally{LeavePhysical(dpi);}
     }
+    internal static bool OwnsPendingMaximizedPlacement(Record r,Placement current,bool hidden,bool maximized){
+        return r!=null&&r.ExpectedNormalCaptured&&(r.Show==1||r.Show==3)&&hidden&&maximized&&current.Show==3&&
+            current.Normal.Left==r.ExpectedNormalLeft&&current.Normal.Top==r.ExpectedNormalTop&&
+            current.Normal.Right==r.ExpectedNormalRight&&current.Normal.Bottom==r.ExpectedNormalBottom;
+    }
     private static bool RestorePhysical(Record r){
         if(!Identity(r))return false;IntPtr w=new IntPtr(r.Window);bool restored=true,restorePosition=false;
         Placement current=new Placement{Length=(uint)Marshal.SizeOf(typeof(Placement))};Rect bounds;
         bool hidden=!IsWindowVisible(w),minimized=IsIconic(w),atOwned=GetWindowRect(w,out bounds)&&bounds.Left==r.ExpectedLeft&&bounds.Top==r.ExpectedTop&&bounds.Right==r.ExpectedRight&&bounds.Bottom==r.ExpectedBottom;
         if(GetWindowPlacement(w,ref current)){
             bool atOriginal=current.Normal.Left==r.Left&&current.Normal.Top==r.Top&&current.Normal.Right==r.Right&&current.Normal.Bottom==r.Bottom;
-            restorePosition=!minimized&&(atOwned||(hidden&&atOriginal));
+            restorePosition=!minimized&&(atOwned||(hidden&&atOriginal)||OwnsPendingMaximizedPlacement(r,current,hidden,IsZoomed(w)));
             if(restorePosition&&!r.PositionRestoreRequested){current.Flags|=4;current.Show=r.Show<=1?4:r.Show==2?7:r.Show;current.Normal=new Rect{Left=r.Left,Top=r.Top,Right=r.Right,Bottom=r.Bottom};restored=SetWindowPlacement(w,ref current);r.PositionRestoreRequested=restored;}
             // The independent helper cannot read the owner's in-memory hide
             // requests. A pre-request visible sample can precede an already

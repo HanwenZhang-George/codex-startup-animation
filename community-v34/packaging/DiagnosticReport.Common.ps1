@@ -121,6 +121,12 @@ function Convert-FixHandoff([string]$Body,[string]$Utc) {
     }
     $nativeWait=$Body.StartsWith('Native readiness waiting after placement; ',[StringComparison]::Ordinal)
     $placementWait=$Body.StartsWith('Compact placement waiting; ',[StringComparison]::Ordinal)
+    if($Body.StartsWith('Native hidden maximized placement confirmed; ',[StringComparison]::Ordinal)){
+        $fields.category='native-hidden-maximized-placement'
+        foreach($key in @('originalShow','capturedShow','currentShow')){$fields[$key]=Get-FixEventNumber $Body $key 11 0}
+        $fields.lateMaximized=Get-FixEventBoolean $Body 'lateMaximized'
+        return [pscustomobject]$fields
+    }
     if($nativeWait -or $placementWait){
         $fields.category=if($nativeWait){'native-readiness-wait'}else{'compact-placement-wait'}
         $fields.phase=Get-FixEventNumber $Body 'phase' 2
@@ -230,7 +236,7 @@ function Convert-FixLogEvent([string]$Line,[string]$Relative) {
     if(-not [datetime]::TryParse($match.Groups['utc'].Value,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$utc)){return $null}
     $stamp=$utc.ToUniversalTime().ToString('o');$body=$match.Groups['body'].Value
     if($Relative -ceq 'diagnostics/portable-launch.log'){
-        $codes=@('PUBLIC_ENTRY_BUSY','PUBLIC_PREPARATION_TIMEOUT','PUBLIC_LAUNCH_FAILED','PUBLIC_CHILD_TIMEOUT','PUBLIC_COMPONENT_OR_SIGNATURE_REJECTED','PUBLIC_PREPARATION_FAILED','PUBLIC_UNSUPPORTED_WINDOWS','PUBLIC_CODE_INTEGRITY_FAILED','PUBLIC_MEDIA_INCOMPLETE','PUBLIC_LAUNCHER_CONFIG_INVALID','PUBLIC_LAUNCHER_ASSET_INVALID','PUBLIC_OFFICIAL_CODEX_NOT_INSTALLED','PUBLIC_PACKAGE_ENUMERATION_FAILED','PUBLIC_SUPPORTED_CODEX_EXECUTABLE_NOT_FOUND')
+        $codes=@('PUBLIC_ENTRY_BUSY','PUBLIC_PREPARATION_TIMEOUT','PUBLIC_LAUNCH_FAILED','PUBLIC_CHILD_TIMEOUT','PUBLIC_COMPONENT_OR_SIGNATURE_REJECTED','PUBLIC_PREPARATION_FAILED','PUBLIC_UNSUPPORTED_WINDOWS','PUBLIC_CODE_INTEGRITY_FAILED','PUBLIC_MEDIA_INCOMPLETE','PUBLIC_LAUNCHER_CONFIG_INVALID','PUBLIC_LAUNCHER_ASSET_INVALID','PUBLIC_OFFICIAL_CODEX_NOT_INSTALLED','PUBLIC_PACKAGE_ENUMERATION_FAILED','PUBLIC_SUPPORTED_CODEX_EXECUTABLE_NOT_FOUND','PUBLIC_OFFICIAL_DISCOVERY_FAILED','PUBLIC_OFFICIAL_IDENTITY_REJECTED','PUBLIC_OFFICIAL_RUNTIME_UNSUPPORTED')
         if($body -cin $codes){return [pscustomobject]@{utc=$stamp;category='public-entry';publicCode=$body}}
         $exit=[regex]::Match($body,'\APUBLIC_CHILD_EXIT_(?<code>-?\d{1,10})\z');$number=0
         if($exit.Success -and [int]::TryParse($exit.Groups['code'].Value,[ref]$number)){return [pscustomobject]@{utc=$stamp;category='public-entry';publicCode='PUBLIC_CHILD_EXIT';exitCode=$number}}
@@ -375,6 +381,36 @@ function Get-PortableMediaPresence([string]$Root,$Records) {
     }
     return ,$result
 }
+function Get-PortableIdentityPolicy([string]$Root) {
+    # Generated runtime configuration is deliberately not a release member.
+    # Export only its fixed policy shape; no package names, hashes, paths or
+    # unknown JSON values can enter the shareable report.
+    $result=[ordered]@{state='unavailable';policyVersion=-1;identityMode='unknown';familyMatches=-1;legacyPinsPresent=-1;identityVerified=$false}
+    $stream=$null
+    try {
+        $path=Join-FixPath $Root 'wallpaper-host-config.json'
+        if(-not [IO.File]::Exists($path)){$result.state='missing';return [pscustomobject]$result}
+        $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        if($stream.Length -lt 2 -or $stream.Length -gt 16384){$result.state='invalid';return [pscustomobject]$result}
+        $bytes=New-Object byte[] ([int]$stream.Length);$used=0
+        while($used -lt $bytes.Length){$read=$stream.Read($bytes,$used,$bytes.Length-$used);if($read -eq 0){throw 'FCP-POLICY-SNAPSHOT'};$used+=$read}
+        $text=[Text.UTF8Encoding]::new($false,$true).GetString($bytes).TrimStart([char]0xfeff)
+        if(-not $text.TrimStart().StartsWith('{',[StringComparison]::Ordinal)){$result.state='invalid';return [pscustomobject]$result}
+        $value=ConvertFrom-Json -InputObject $text
+        if($value -isnot [pscustomobject]){$result.state='invalid';return [pscustomobject]$result}
+        foreach($key in @('version','officialIdentityMode','officialFamilyName','packageFullName','executableSha256')){
+            $expected=[int]($null -ne $value.PSObject.Properties[$key])
+            if([regex]::Matches($text,'"'+[regex]::Escape($key)+'"\s*:').Count -ne $expected){$result.state='invalid';return [pscustomobject]$result}
+        }
+        $version=$value.PSObject.Properties['version'];$mode=$value.PSObject.Properties['officialIdentityMode'];$family=$value.PSObject.Properties['officialFamilyName']
+        if($null -ne $version -and (Test-FixInteger $version.Value 1 2)){$result.policyVersion=[int]$version.Value}
+        if($null -ne $mode -and $mode.Value -is [string] -and $mode.Value -ceq 'registered-signed'){$result.identityMode='registered-signed'}
+        if($null -ne $family -and $family.Value -is [string]){$result.familyMatches=[int]($family.Value -ceq 'OpenAI.Codex_2p2nqsd0c76g0')}
+        $result.legacyPinsPresent=[int]($null -ne $value.PSObject.Properties['packageFullName'] -or $null -ne $value.PSObject.Properties['executableSha256'])
+        $result.state='read'
+    }catch{$result.state='unavailable'}finally{if($stream){$stream.Dispose()}}
+    return [pscustomobject]$result
+}
 function Get-PortableDiagnosticReport([string]$ReleaseRoot) {
     $root=Assert-FixPath $ReleaseRoot -Directory
     $manifest=Read-PortableReportManifest $root
@@ -392,7 +428,7 @@ function Get-PortableDiagnosticReport([string]$ReleaseRoot) {
         schemaVersion=1;kind='CodexDragonStartupFixReport';collectedUtc=[DateTime]::UtcNow.ToString('o')
         targetManifestSha256=$manifest.sha256;declaredFileCount=$manifest.declaredFileCount;verifiedFileCountAtPreparation=-1
         logByteLimit=262144;logRecordLimit=128;rawLogsIncluded=$false;logs=$logs
-        compatibility=$compatibility;mediaPresence=(Get-PortableMediaPresence $root $manifest.files)
+        compatibility=$compatibility;mediaPresence=(Get-PortableMediaPresence $root $manifest.files);officialPolicy=(Get-PortableIdentityPolicy $root)
     }
 }
 function Write-PortableDiagnosticReport([string]$ReleaseRoot) {

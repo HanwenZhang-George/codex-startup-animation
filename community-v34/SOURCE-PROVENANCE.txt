@@ -1,3 +1,11 @@
+﻿R10 test candidate provenance (2026-10-22)
+Public R9 download: community-v34-r5 / CodexDragon-V34-Portable-Windows-x64-r5.zip
+SHA-256: 9bc3c666a2803b4853378cc984eddf54febf0feb68d5abe1e2b5742199d8b3a5
+All 46 original media/font/image files and renderer.js are retained byte-for-byte.
+The automatic official identity resolver and guarded late-maximized handoff are
+ported from the locally validated implementation, without private installation
+paths, credentials, CC Switch integration or previously generated runtime state.
+New public test candidate only; separate-computer acceptance is pending.
 Public packaging candidate, based on the V34 repaired runtime.
 
 The r8 test candidate fixes startup resource-protection cleanup that sent a

@@ -217,6 +217,44 @@ function Get-CodexResourceProtectionAnalysis($Report) {
     }
     return $lines.ToArray()
 }
+function Get-CodexOfficialAdaptationAnalysis($Report) {
+    $lines=[Collections.Generic.List[string]]::new()
+    $policy=Get-CodexAnalysisValue $Report 'officialPolicy'
+    $policyState=Get-CodexAnalysisEnum $policy 'state' @('read','missing','invalid','unavailable')
+    if($policyState -ceq 'read'){
+        if((Get-CodexAnalysisNumber $policy 'legacyPinsPresent' 1) -eq 1){$lines.Add('配置记录仍含旧版官方客户端固定版本或哈希字段；它不是 R10 自动识别策略的有效形态。请确认使用新包最外层 Launch.exe，并发送报告，不要手工取消签名校验。')}
+        elseif((Get-CodexAnalysisNumber $policy 'policyVersion' 2 1) -eq 2 -and (Get-CodexAnalysisEnum $policy 'identityMode' @('registered-signed')) -ceq 'registered-signed' -and (Get-CodexAnalysisNumber $policy 'familyMatches' 1) -eq 1 -and (Get-CodexAnalysisNumber $policy 'legacyPinsPresent' 1) -eq 0){$lines.Add('配置记录采用自动识别当前已注册、带有效官方签名的客户端策略，没有固定官方版本号或 EXE 哈希。配置存在本身不证明本次身份验证、连接或播放成功。')}
+        else{$lines.Add('官方客户端识别策略的配置字段不完整或不受支持，不能据此确认自动版本适配已经启用。')}
+    }elseif($policyState -ceq 'missing'){$lines.Add('尚未发现本包生成的客户端识别配置；首次运行前属于正常情况，也可能表示尚未从这个目录启动。')}
+    elseif($policyState -cin @('invalid','unavailable')){$lines.Add('本包生成的客户端识别配置未能完整读取；报告不导出其中的原始内容。')}
+    $logs=Get-CodexAnalysisValue $Report 'logs'
+    if($logs -isnot [array] -or $logs.Count -gt 16){return $lines.ToArray()}
+    $events=[Collections.Generic.List[object]]::new();$cutoff=-1L
+    foreach($log in $logs){
+        $name=Get-CodexAnalysisEnum $log 'log' @('output/wallpaper-readiness.log.1','output/wallpaper-readiness.log','output/handoff-latest.log')
+        $records=Get-CodexAnalysisValue $log 'records'
+        if($name -ceq 'unknown' -or $records -isnot [array] -or $records.Count -gt 128){continue}
+        foreach($record in $records){
+            $ticks=Get-CodexAnalysisUtc $record;if($ticks -lt 0){continue}
+            $category=Get-CodexAnalysisEnum $record 'category' @('host-phase','launcher-stage')
+            if($name -ceq 'output/handoff-latest.log'){
+                if($category -ceq 'launcher-stage' -and (Get-CodexAnalysisEnum $record 'stage' @('launcher-entry')) -ceq 'launcher-entry'){$cutoff=[Math]::Max($cutoff,$ticks)}
+            }elseif($category -ceq 'host-phase'){
+                $phase=Get-CodexAnalysisNumber $record 'phase' 63
+                if($phase -eq 20){$cutoff=[Math]::Max($cutoff,$ticks)}
+                if($phase -eq 44){$events.Add([pscustomobject]@{ticks=$ticks;code=(Get-CodexAnalysisNumber $record 'code' 65535)})}
+            }
+        }
+    }
+    $latest=-1L;$codes=[Collections.Generic.HashSet[long]]::new()
+    foreach($event in $events){if($event.ticks -lt $cutoff){continue};if($event.ticks -gt $latest){$latest=$event.ticks;$codes.Clear()};if($event.ticks -eq $latest){[void]$codes.Add($event.code)}}
+    if($codes.Count -gt 1){$lines.Add('同一最新时刻的官方身份适配记录不一致，不能选取其中一条认定适配成功。')}
+    elseif($codes.Count -eq 1){
+        $message=@{1='官方身份适配记录：当时已选中当前注册并通过签名验证的官方客户端，尚未证明已经启动或播放。';2='官方身份适配记录：当时已验证实际启动的客户端进程与选中的官方身份一致，尚未证明壁纸已播放。';3='官方身份适配记录：检测到已运行的官方客户端；这一条不证明已经接入壁纸。';10='官方身份适配记录：注册查询未完成或正在变化。可能处于官方更新过程，不能确定已安装版本。';11='官方身份适配记录：注册清单或软件身份未通过验证。请发送报告，不要禁用身份校验。';12='官方身份适配记录：签名验证未通过、正在进行或超过时限；不能仅凭此记录断言客户端签名无效。';13='官方身份适配记录：实际进程身份无法确认或与选中目标不一致。程序保留安全校验，需要结合报告分析。';14='官方身份适配记录：检测到当前不支持的客户端运行时。普通版本或安装路径更新可以自动适配，但框架或接入协议改变仍可能需要更新启动器。';15='官方身份适配记录：启动链路出现未分类异常；这一条记录不能单独认定是身份解析失败。'}
+        foreach($code in $codes){if($message.ContainsKey([int]$code)){$lines.Add($message[[int]$code])}else{$lines.Add('官方身份适配记录包含未知结果，不能据此认定适配成功。')}}
+    }
+    return $lines.ToArray()
+}
 function Get-CodexDiagnosticAnalysis($Report,$FileCheck) {
     $lines=[Collections.Generic.List[string]]::new()
     $lines.Add('Codex 启动器与壁纸：本地诊断说明')
@@ -257,6 +295,7 @@ function Get-CodexDiagnosticAnalysis($Report,$FileCheck) {
     if($webview){$lines.Add('发现 WebView2 相关文件线索；不能据此断言客户端采用 Tauri，也不能据此认定壁纸接入已适配。')}
     elseif($electron){$lines.Add('发现 Electron 相关文件线索；文件线索不等于本次通信与壁纸接入成功。')}
     else{$lines.Add('客户端运行时线索不足，暂不能确定框架或壁纸接入兼容性。')}
+    foreach($line in (Get-CodexOfficialAdaptationAnalysis $Report)){$lines.Add($line)}
     $logs=Get-CodexAnalysisValue $Report 'logs';$events=[Collections.Generic.List[object]]::new();$cutoff=-1L
     if($logs -is [array] -and $logs.Count -le 16){foreach($log in $logs){
         $name=Get-CodexAnalysisEnum $log 'log' @('output/wallpaper-readiness.log.1','output/wallpaper-readiness.log','output/handoff-latest.log')

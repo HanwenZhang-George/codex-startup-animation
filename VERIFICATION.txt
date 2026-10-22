@@ -1,73 +1,84 @@
-Community V34 R9 publication verification
+Community V34 R10 publication verification
 Date: 2026-10-22
 
-Approved complete distribution (stable public filename, R9 contents)
+Approved complete distribution (stable public filename, R10 contents)
   CodexDragon-V34-Portable-Windows-x64-r5.zip
-  Bytes: 369184032
-  SHA256: 9BC3C666A2803B4853378CC984EDDF54FEBF0FEB68D5ABE1E2B5742199D8B3A5
+  Bytes: 369241850
+  SHA256: 3B5F1201DDFB244A93ED2F8391E1C0F048C5956A76ED7A9F8D218E92BEA48B07
+  Executable file version: 34.10.0.0
+  Release manifest version: 34.2-auto-adapt-r10-test
 
 Artifact identity and user acceptance
-- The contributor tested this R9 artifact on a second computer and reported
-  it working, then explicitly authorized publication. This is user-reported
-  end-to-end acceptance, not certification of all Windows/GPU combinations.
-- The public ZIP is byte-identical to the accepted r9-test ZIP. No rebuild,
+- The contributor tested the complete R10 artifact on a second computer and
+  reported no problems, then explicitly authorized publication. This is
+  user-reported end-to-end acceptance, not certification of every device.
+- The public ZIP is byte-identical to that accepted r10-test ZIP. No rebuild,
   re-encoding or repacking occurred after acceptance. Only its external name
   retains r5 to preserve the previously shared direct download URL.
 - The original community-v34-r5 Release page and asset names remain stable.
   Its mutable compatibility tag tracks the corresponding current source;
-  community-v34-r9 records this R9 source publication.
+  community-v34-r10 records this R10 source publication.
 - Candidate/test/unpublished wording inside the frozen ZIP is historical.
   Current publication status is documented in the repository and Release.
-- All 85 community-v34 source files match the ZIP source files byte-for-byte.
-  README, TROUBLESHOOTING, CONTRIBUTING and this verification are external
-  publication documentation and do not modify the accepted ZIP.
+- All 91 community-v34 source files match the ZIP source files byte-for-byte.
+  Repository-level publication documentation is outside the accepted ZIP.
+- The R10 work started from a fresh download of the public R9 ZIP, whose hash
+  was 9BC3C666A2803B4853378CC984EDDF54FEBF0FEB68D5ABE1E2B5742199D8B3A5.
 
-R9 repair scope
-- A Windows low-physical-memory notification alone no longer permanently
-  disables wallpaper preparation. Critical process-available commit below
-  512 MiB pauses decoding; recovery requires at least 1 GiB for the existing
-  continuous 30-second hold. This is commit headroom, not free physical RAM.
-- A paused attach retains its File without allocating the Blob/decoder.
-  Recovery retains the same document and validated File attachment; each
-  decoder wake uses a fresh media generation and fresh frame evidence.
-- Fresh authenticated host-only pressure can release the startup cover even
-  when the launcher's independent pressure sample missed that short signal.
-- Startup self-resource limits, signed client/path identity, private pipe,
-  lease/generation checks and explicit pause/disable semantics remain.
-- Diagnostics distinguish legacy terminal error 174, reversible suspension,
-  recovery requests and actual first-frame evidence.
-- Earlier native handoff, window transparency and warm-launch fixes remain.
+R10 repair scope
+- Official client identity is resolved from the current user's registered
+  package, its manifest application entry and a valid official signature.
+  Generated policy no longer pins a fixed official version or EXE hash.
+- Cold launch selects the target in the host and verifies the created process
+  and its creation time against that selection. Later handoff stays bound to
+  that actual process instead of independently choosing a newer version.
+- Startup handoff now admits the observed late normal-to-hidden-maximized
+  transition when exact owned placement and recovery checks still hold.
+  Foreign placement, stale identity and initially minimized cases are not
+  admitted by this correction. Existing bounded waits and rollback remain.
+- Diagnostics distinguish configured automatic identity policy, successful
+  identity verification, transport connection and actual media playback.
+- R9 commit-headroom recovery remains: below 512 MiB pauses decoding; at least
+  1 GiB continuously for 30 seconds permits a recovery request. A low physical
+  memory notification alone does not permanently disable the wallpaper.
+- Existing integrity, signature, process/session, private pipe, generation,
+  startup resource and reversible-pause protections remain.
 
 Verification evidence
-- ZIP roundtrip: 156 entries, 155 manifest files plus the manifest itself.
-  Every member and manifest hash verified, with no extra runtime/private data.
-- All 46 original media/font/image assets, including six MP4 videos, are
-  present with unchanged hashes. No quality, frame-rate, opacity, selection
-  probability or inter-appearance interval reduction was made.
+- ZIP roundtrip: 162 entries, 161 manifest files plus the manifest itself.
+  Every member and manifest hash verified; 91 frozen source files matched.
+- All 46 original media/font/image assets, including six MP4 videos, and the
+  renderer script match R9 byte-for-byte. No quality, frame-rate, opacity,
+  selection-probability or inter-appearance interval reduction was made.
 - Source and four x64 .NET Framework 4.8 executable components are included.
-- Sixteen final isolated regression suites passed against the packaged source.
-- Renderer memory/layout/quality checks: 22 / 166 / 8 passed respectively.
-- Host recovery includes the actual 30-second hold under simulated pressure;
-  tests do not exhaust real machine memory or stress the user's GPU.
-- Thirty support-workflow checks passed. Sample local report reads took about
-  0.8-1.4 seconds; this is a measurement, not a universal timing guarantee.
-- An independent publication audit rechecked the approved ZIP, every member,
-  all media and the exact 85-file source closure before upload.
-- Gitleaks and private-path/credential-pattern checks are performed on the
-  publication tree. Synthetic PRIVATE/SECRET paths in isolation tests are
-  test fixtures, not real user paths or credentials. Scans reduce disclosure
-  risk but are not a mathematical guarantee against every possible secret.
+- Fifteen isolated startup, process, slow-response, resource, memory-recovery
+  and native-window regression suites passed.
+- Identity policy: 68 checks plus four read-only checks of the local official
+  installation passed; packaged executable policy/process checks: 43 passed.
+- Packaged native-window fixtures: 77 checks passed. A separate 26-check R9
+  experiment reproduced the earlier hidden-maximized admission problem.
+  Fixtures used their own windows; they did not control the user's Codex.
+- Renderer layout/memory/quality checks: 166 / 22 / 8 passed respectively.
+- Diagnostic regressions: 265 checks. Thirty support-workflow checks covered
+  report replacement, concurrency, damaged files and output write conflicts.
+- A local lightweight report sample took about 1.1 seconds and was about
+  2.5 KB. These measurements are not guarantees for every filesystem/device.
+- These tests do not exhaust real memory or run GPU/whole-system stress tests.
+- Secret and private-path scans supplement the explicit release-file scope.
+  Synthetic PRIVATE/SECRET paths in isolation tests are fixture values, not
+  real user paths or credentials. Scans reduce disclosure risk; they cannot
+  mathematically guarantee the absence of every possible secret.
 
 Support and privacy
 - Run Diagnostics/One-Click-Diagnostics.cmd in the actual running copy.
   Fixed outputs: Diagnostics/Reports/latest-analysis.txt and latest-report.zip.
 - Check-All-Files.cmd optionally verifies all formal file hashes; collect
   diagnostics again afterward to include its bounded verification summary.
-- These support tools neither launch/close/wait for apps nor run CPU/GPU
-  stress tests, download dependencies or upload anything automatically.
-- Only allowlisted bounded diagnostic fields are exported. Do not submit
-  raw logs, credentials, private keys, browser profiles or conversation data.
-- Full instructions and explicitly authorized contact addresses are in
+- Support tools neither launch/close/wait for apps nor run CPU/GPU stress
+  tests, download dependencies or upload anything automatically.
+- Only allowlisted bounded diagnostic fields are exported. Do not submit raw
+  logs, credentials, private keys, browser profiles or conversation data.
+- Detailed instructions and explicitly authorized contact addresses are in
   TROUBLESHOOTING.md. Public commits use a GitHub noreply author address.
 
 Supported boundary
@@ -75,14 +86,18 @@ Supported boundary
   NTFS directory and working Windows media components are required.
 - Wallpaper transport supports the verified official Microsoft Store Codex
   Electron private CDP pipe. Tauri/Wry/WebView2 transport is not implemented.
-  Seeing WebView2 files alone does not establish a client's runtime identity.
+  WebView2 marker files alone do not establish a client's runtime identity.
+- Ordinary official version and manifest-entry path updates can be resolved
+  automatically. Package identity, signer, framework, protocol or DOM changes
+  can still require maintenance; universal future compatibility is not claimed.
 - Existing ordinary Codex sessions without the managed wallpaper host cannot
   safely be retrofitted. Save work, exit normally, then use this Launch.exe.
-- No public debug port is enabled; unsupported clients fail safely.
+- No public debug port is enabled. Unsupported identities/runtimes do not
+  receive an unchecked wallpaper attachment.
 - File integrity does not prove decoding or UI performance on every device.
 - Launch.exe runs as a normal user. Optional Install-and-Bind.cmd is separate;
   it attempts a reversible binding to one trusted existing desktop shortcut.
-- The author's stable Codex/CC Switch installations were not changed for this
-  publication. Public distribution includes no CC Switch or account settings.
+- The author's stable local installations were not changed for publication.
+  Public distribution includes no CC Switch, account settings or chat data.
 - Upstream attribution and existing font license are retained; this project
   does not grant new rights to third-party code or media.

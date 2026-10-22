@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -14,14 +14,29 @@ using System.Threading.Tasks;
 namespace CodexDragonWallpaper {
 internal sealed class Configuration {
     internal string Exe,Renderer,Media,AlternateMedia;internal bool Enabled;internal int AlternateDiagnostic;
+    internal CodexDragon.Official.OfficialIdentitySnapshot Official;
+    internal static bool AutomaticPolicy(Dictionary<string,object> value){
+        return Json.Number(value,"version")==2&&Json.Text(value,"officialFamilyName")=="OpenAI.Codex_2p2nqsd0c76g0"&&
+            Json.Text(value,"officialIdentityMode")=="registered-signed"&&!value.ContainsKey("packageFullName")&&!value.ContainsKey("executableSha256");
+    }
+    internal void ReleaseOfficial(){if(Official!=null){Official.Dispose();Official=null;}}
+    internal void VerifyStarted(int pid,long created){
+        // The Host alone selects the cold-start executable. Subsequent layers
+        // attest the exact child generation, never reselect a newer package.
+        if(Official==null)throw new HostFailure(60);
+        using(var actual=CodexDragon.Official.OfficialIdentityResolver.VerifyProcess(pid,created)){
+            if(!String.Equals(actual.Executable,Official.Executable,StringComparison.OrdinalIgnoreCase)||
+                !String.Equals(actual.Sha256,Official.Sha256,StringComparison.OrdinalIgnoreCase)||
+                actual.PackageFullName!=Official.PackageFullName)throw new HostFailure(60);
+        }
+    }
     internal string[] MediaFiles {get{return String.IsNullOrEmpty(AlternateMedia)?new[]{Media}:new[]{Media,AlternateMedia};}}
     internal static Configuration Load(string directory){
         string file=Files.Regular(Path.Combine(directory,"wallpaper-host-config.json"));if(new FileInfo(file).Length>16384)throw new HostFailure(50);
         var m=Json.Map(Json.Serializer().DeserializeObject(File.ReadAllText(file,Encoding.UTF8)));
-        if(Json.Number(m,"version")!=1)throw new HostFailure(50);
-        string package=Json.Text(m,"packageFullName"),exeHash=Json.Text(m,"executableSha256"),rendererHash=Json.Text(m,"rendererSha256");
-        if(!ValidHash(exeHash)||!ValidHash(rendererHash))throw new HostFailure(50);
-        string exe=Path.Combine(Native.PackagePath(package),"app","ChatGPT.exe");Native.VerifyOfficial(exe,exeHash);
+        if(!AutomaticPolicy(m))throw new HostFailure(50);
+        string rendererHash=Json.Text(m,"rendererSha256");
+        if(!ValidHash(rendererHash))throw new HostFailure(50);
         string renderer=Files.Regular(Path.Combine(directory,"renderer.js"));if(new FileInfo(renderer).Length>131072||Files.Hash(renderer)!=rendererHash.ToLowerInvariant())throw new HostFailure(51);
         string media=Files.Regular(Json.Text(m,"mediaPath"));
         long mediaBytes=Json.Number(m,"mediaBytes");string mediaHash=Json.Text(m,"mediaSha256");
@@ -30,7 +45,17 @@ internal sealed class Configuration {
         int alternateCode;string alternate=LoadAlternateMedia(m,out alternateCode);
         // Optional-media damage must not disable the established wallpaper.
         // 253=present but rejected, 254=verified; absence is legacy-compatible.
-        return new Configuration{Exe=exe,Renderer=File.ReadAllText(renderer,Encoding.UTF8),Media=media,AlternateMedia=alternate,AlternateDiagnostic=alternateCode,Enabled=(bool)enabled};
+        var result=new Configuration{Renderer=File.ReadAllText(renderer,Encoding.UTF8),Media=media,AlternateMedia=alternate,AlternateDiagnostic=alternateCode,Enabled=(bool)enabled};
+        try{
+            result.Official=CodexDragon.Official.OfficialIdentityResolver.ResolveCurrent();
+            result.Exe=result.Official.Executable;
+            // These markers admit only the supported Electron family. The
+            // existing bounded CDP/DOM/media probes remain authoritative.
+            string app=Path.GetDirectoryName(result.Exe);
+            if(!File.Exists(Path.Combine(app,"chrome.dll"))||!File.Exists(Path.Combine(app,"resources","app.asar")))throw new HostFailure(61);
+            PreparationDiagnostics.RecordEvent(44,0,1,null);
+            return result;
+        }catch{result.ReleaseOfficial();throw;}
     }
     internal static string LoadAlternateMedia(Dictionary<string,object> m,out int diagnostic){
         diagnostic=0;
@@ -355,6 +380,12 @@ internal static class Program {
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,out uint pid);
     static string directory=AppDomain.CurrentDomain.BaseDirectory;
     static string Discovery {get{return Path.Combine(directory,"wallpaper-host-session.json");}}
+    internal static bool ExistingOfficial(out int pid,out long created){
+        pid=0;created=0;
+        var snapshots=CodexDragon.Official.OfficialIdentityResolver.FindRunning();
+        try{if(snapshots.Length==0)return false;pid=snapshots[0].Pid;created=snapshots[0].Created;return true;}
+        finally{foreach(var snapshot in snapshots)snapshot.Dispose();}
+    }
     internal static bool Existing(string exe,out int pid,out long created){
         pid=0;created=0;bool unknown=false;
         int ownSession;using(var current=Process.GetCurrentProcess()){ownSession=current.SessionId;}
@@ -401,26 +432,27 @@ internal static class Program {
         var startupClock=Stopwatch.StartNew();int startupPhase=20;PreparationDiagnostics.RecordEvent(startupPhase,0,0,null);
         if(args.Length==1&&args[0]=="--stop-wallpaper"){try{StopWallpaper();PreparationDiagnostics.RecordEvent(33,startupClock.ElapsedMilliseconds,0,null);return 0;}catch(Exception error){PreparationDiagnostics.RecordEvent(33,startupClock.ElapsedMilliseconds,55,error);return 55;}}
         if(args.Length!=3||(args[0]!="--launch"&&args[0]!="--isolated-test")||args[1]!="--session"||!Regex.IsMatch(args[2],"^[a-f0-9]{32}$")){PreparationDiagnostics.RecordEvent(34,startupClock.ElapsedMilliseconds,56,null);return 56;}
-        bool isolated=args[0]=="--isolated-test";string session=args[2];var state=new HostState();OwnedClient owned=null;ControlPipe control=null;Mutex launch=null;bool locked=false,published=false;
+        bool isolated=args[0]=="--isolated-test";string session=args[2];var state=new HostState();OwnedClient owned=null;ControlPipe control=null;Mutex launch=null;Configuration config=null;bool locked=false,published=false;
         try{
             startupPhase=21;if(isolated)GateIsolated();
             startupPhase=22;control=new ControlPipe(state,session);control.Start();
             startupPhase=23;launch=LaunchLock(session,isolated);try{locked=launch.WaitOne(0);}catch(AbandonedMutexException){locked=true;}
             if(!locked){PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,57,null);state.MediaError(57);state.TerminalRead.WaitOne(10000);return 57;} // UNKNOWN, never signals safe fallback.
             startupPhase=24;try{if(!isolated){Publish(session,state);published=true;}}catch(Exception error){PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,55,error);} // Discovery failure never affects owned app.
-            startupPhase=25;PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,0,null);Configuration config=Configuration.Load(directory);
+            startupPhase=25;PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,0,null);config=Configuration.Load(directory);
             if(config.AlternateDiagnostic!=0)PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,config.AlternateDiagnostic,null);
             startupPhase=26;PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,0,null);
             int existingPid;long existingCreated;
-            if(!isolated&&Existing(config.Exe,out existingPid,out existingCreated)){PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,3,null);state.Existing(existingPid,existingCreated);state.TerminalRead.WaitOne(10000);Thread.Sleep(150);return 0;}
+            if(!isolated&&ExistingOfficial(out existingPid,out existingCreated)){config.ReleaseOfficial();PreparationDiagnostics.RecordEvent(44,startupClock.ElapsedMilliseconds,3,null);PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,3,null);state.Existing(existingPid,existingCreated);state.TerminalRead.WaitOne(10000);Thread.Sleep(150);return 0;}
             string isolatedRoot=null;
             if(isolated){isolatedRoot=Path.Combine(directory,"isolated-"+session);if(Directory.Exists(isolatedRoot))throw new HostFailure(58);Directory.CreateDirectory(isolatedRoot);Directory.CreateDirectory(Path.Combine(isolatedRoot,"electron-profile"));Directory.CreateDirectory(Path.Combine(isolatedRoot,"codex-home"));}
             startupPhase=27;var env=HostEnvironment.Build(isolatedRoot);
-            if(!isolated&&Existing(config.Exe,out existingPid,out existingCreated)){PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,3,null);state.Existing(existingPid,existingCreated);state.TerminalRead.WaitOne(10000);Thread.Sleep(150);return 0;}
+            if(!isolated&&ExistingOfficial(out existingPid,out existingCreated)){config.ReleaseOfficial();PreparationDiagnostics.RecordEvent(44,startupClock.ElapsedMilliseconds,3,null);PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,3,null);state.Existing(existingPid,existingCreated);state.TerminalRead.WaitOne(10000);Thread.Sleep(150);return 0;}
             startupPhase=28;PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,0,null);owned=OwnedClient.Start(config.Exe,env,isolatedRoot==null?null:Path.Combine(isolatedRoot,"electron-profile"),state.Started,
                 ()=>{lock(state.Gate){return state.Disabled||state.MediaCode>=100?2:state.RevealEverRequested?1:0;}},
                 (reason,elapsed)=>PreparationDiagnostics.Record(15,elapsed,200+reason));
             state.Started(owned.Pid,owned.Created); // Idempotent ownership commit before any other fallible work.
+            try{config.VerifyStarted(owned.Pid,owned.Created);PreparationDiagnostics.RecordEvent(44,startupClock.ElapsedMilliseconds,2,null);}finally{config.ReleaseOfficial();}
             startupPhase=29;PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,0,null);var transport=new CdpTransport(owned,isolated);
             startupPhase=30;var preparationClock=Stopwatch.StartNew();
             var worker=new Thread(()=>{try{new WallpaperSession(transport,state,config,isolated).Run();}catch(HostFailure e){PreparationDiagnostics.RecordFailure(15,preparationClock.ElapsedMilliseconds,e);state.MediaError(100+e.Code);}catch(Exception error){PreparationDiagnostics.RecordFailure(15,preparationClock.ElapsedMilliseconds,error);state.MediaError(199);}}){IsBackground=true,Name="Wallpaper prepare/control"};worker.Start();
@@ -430,13 +462,16 @@ internal static class Program {
             // Recoverable renderer/control failures never close the CDP handles.
             startupPhase=31;PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,0,null);owned.Wait();watchdog.Dispose();if(isolatedClose!=null)isolatedClose.Dispose();return 0;
         }catch(HostFailure e){
+            if(e.Code==60||e.Code==61)PreparationDiagnostics.RecordEvent(44,startupClock.ElapsedMilliseconds,e.Code==61?14:13,e);
             PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,e.Code,e);
             if(owned!=null){state.MediaError(100+e.Code);owned.Wait();}else{state.NoStart(e.Code);state.TerminalRead.WaitOne(10000);Thread.Sleep(150);}return e.Code;
         }catch(Exception error){
+            PreparationDiagnostics.RecordEvent(44,startupClock.ElapsedMilliseconds,CodexDragon.Official.OfficialIdentityResolver.DiagnosticCode(error),error);
             PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,59,error);
             if(owned!=null){state.MediaError(199);owned.Wait();}else{state.NoStart(59);state.TerminalRead.WaitOne(10000);Thread.Sleep(150);}return 59;
         }finally{
             PreparationDiagnostics.RecordEvent(32,startupClock.ElapsedMilliseconds,0,null);
+            if(config!=null)config.ReleaseOfficial();
             // At this point a successfully spawned official process has exited.
             if(owned!=null)owned.Dispose();if(control!=null)control.Dispose();if(published)RemoveDiscovery(session,state);if(locked&&launch!=null)try{launch.ReleaseMutex();}catch{}if(launch!=null)launch.Dispose();
         }

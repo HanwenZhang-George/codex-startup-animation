@@ -21,7 +21,7 @@ $compiler=Join-Path $framework 'csc.exe'
 if(-not (Test-Path -LiteralPath $compiler)){throw 'The Windows .NET Framework compiler is missing. Repair .NET Framework 4.8.'}
 [IO.Directory]::CreateDirectory($output)|Out-Null
 $build=Join-Path $output 'build';[IO.Directory]::CreateDirectory($build)|Out-Null
-$launcherSources=@('DragonLauncher.cs','CinematicScene.cs','StrokeTrace.cs','FilmSplash.cs','FilmSplashV2.cs','NativeHandoff.cs','PulseReveal.cs','EyeRig.cs','BridgeActivation.cs','StartupReliability.cs','NativeRestoreGuard.cs')
+$launcherSources=@('DragonLauncher.cs','CinematicScene.cs','StrokeTrace.cs','FilmSplash.cs','FilmSplashV2.cs','NativeHandoff.cs','PulseReveal.cs','EyeRig.cs','BridgeActivation.cs','StartupReliability.cs','NativeRestoreGuard.cs','OfficialIdentity.cs')
 $hostSources=@('Program.cs','CdpTransport.cs','ControlPipe.cs','NativeHost.cs','WallpaperSession.cs')
 $references=@('mscorlib.dll','System.dll','System.Core.dll','System.Configuration.dll','System.Drawing.dll','System.Runtime.Serialization.dll','System.Security.dll','System.Web.Extensions.dll','System.Windows.Forms.dll','System.Xaml.dll','System.Xml.dll','System.Xml.Linq.dll','WPF/PresentationCore.dll','WPF/PresentationFramework.dll','WPF/WindowsBase.dll')
 $compiled=[Collections.Generic.List[object]]::new()
@@ -46,7 +46,7 @@ function Compile([string]$Name,[string]$Entry,[string[]]$Sources) {
     $compiled.Add([ordered]@{name=$Name;entryPoint=$Entry;sha256=Get-Sha256 (Join-Path $output $Name);targetFramework='.NETFramework,Version=v4.8';platform='x64'})
 }
 $launchFiles=@($launcherSources|ForEach-Object {Join-Path $source ('src/'+$_)})
-$hostFiles=@($hostSources|ForEach-Object {Join-Path $source ('wallpaper-host-src/'+$_)})
+$hostFiles=@($hostSources|ForEach-Object {Join-Path $source ('wallpaper-host-src/'+$_)})+@(Join-Path $source 'src/OfficialIdentity.cs')
 Compile 'Start-Codex-Dragon.exe' 'DragonLauncher.Program' $launchFiles
 Compile 'WallpaperControls.exe' 'DragonLauncher.WallpaperControls' ($launchFiles+@(Join-Path $source 'src/WallpaperControls.cs'))
 Compile 'WallpaperHost.exe' 'CodexDragonWallpaper.Program' $hostFiles
@@ -78,7 +78,7 @@ foreach($name in $codeFiles){Copy-Item -LiteralPath (Join-Path $source $name) -D
 foreach($folder in @('src','wallpaper-host-src','packaging','build-inputs','tests')){Copy-Item -LiteralPath (Join-Path $source $folder) -Destination $codeTarget -Recurse}
 Write-Utf8 (Join-Path $output 'build/build-receipt.json') (@{schemaVersion=1;compiler='Windows .NET Framework 4.x csc.exe';components=@($compiled);sourcePathsAreRelative=$true;fullMediaVerified=$true}|ConvertTo-Json -Depth 6)
 $records=@(Get-ChildItem -LiteralPath $output -Recurse -File|Sort-Object FullName|ForEach-Object {[ordered]@{path=$_.FullName.Substring($output.Length+1).Replace('\','/');bytes=$_.Length;sha256=Get-Sha256 $_.FullName}})
-Write-Utf8 (Join-Path $output 'release-manifest.json') (@{schemaVersion=1;product='CodexDragonPublic';version='34.2-memory-policy-r9-test';files=$records}|ConvertTo-Json -Depth 6)
+Write-Utf8 (Join-Path $output 'release-manifest.json') (@{schemaVersion=1;product='CodexDragonPublic';version='34.2-auto-adapt-r10-test';files=$records}|ConvertTo-Json -Depth 6)
 Test-PackageFiles $output (Read-PackageManifest $output)
 if(-not $SkipZip) {
     $zip=$output+'.zip';if(Test-Path -LiteralPath $zip){throw 'ZIP already exists; choose a fresh output directory.'}

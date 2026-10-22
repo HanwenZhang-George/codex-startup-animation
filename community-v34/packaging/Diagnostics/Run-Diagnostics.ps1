@@ -89,7 +89,7 @@ function Invoke-LocalReport {
         $logs=@();foreach($name in @('diagnostics/portable-launch.log','output/wallpaper-readiness.log.1','output/wallpaper-readiness.log','output/handoff-latest.log','output/launcher-error.txt','output/launcher-media-error.txt')){$logs+=Read-FixLogTail $releaseRoot $name}
         $compatibility=[pscustomobject]@{schemaVersion=1;kind='CodexCompatibilityEvidence';registrationState='unavailable';transportSupportVerified=$false}
         try{. (Join-Path $releaseRoot 'CompatibilityProbe.ps1');$compatibility=Get-CodexCompatibilityInventory}catch{}
-        $report=[pscustomobject][ordered]@{schemaVersion=1;kind='CodexDragonStartupFixReport';collectedUtc=[DateTime]::UtcNow.ToString('o');manifestState='invalid-or-missing';targetManifestSha256='';declaredFileCount=-1;verifiedFileCountAtPreparation=-1;logByteLimit=262144;logRecordLimit=128;rawLogsIncluded=$false;logs=$logs;compatibility=$compatibility;mediaPresence=(Get-PortableMediaPresence $releaseRoot @())}
+        $report=[pscustomobject][ordered]@{schemaVersion=1;kind='CodexDragonStartupFixReport';collectedUtc=[DateTime]::UtcNow.ToString('o');manifestState='invalid-or-missing';targetManifestSha256='';declaredFileCount=-1;verifiedFileCountAtPreparation=-1;logByteLimit=262144;logRecordLimit=128;rawLogsIncluded=$false;logs=$logs;compatibility=$compatibility;mediaPresence=(Get-PortableMediaPresence $releaseRoot @());officialPolicy=(Get-PortableIdentityPolicy $releaseRoot)}
     }
     $check=[ordered]@{schemaVersion=1;state='not-run';passed=$false;fileCount=0;elapsedMs=0;failure='unknown'}
     $prior=Assert-LocalTestPath (Join-Path $toolRoot 'Reports\file-check.json')

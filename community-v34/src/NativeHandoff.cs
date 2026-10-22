@@ -146,6 +146,7 @@ namespace DragonLauncher
             private ulong created;
             private long started;
             private long placementQueuedAt=-1;
+            private long maximizedRestoreQueuedAt=-1;
             private long handoffArmedAt=-1;
             private readonly int timeoutMilliseconds;
             private int phase;
@@ -161,7 +162,7 @@ namespace DragonLauncher
             internal string FailureReason { get; private set; }
             internal int PreparationPhase { get { return phase; } }
             internal long PreparationElapsedMilliseconds { get { return Math.Max(0,CacheClock.ElapsedMilliseconds-started); } }
-            internal string ReadinessDiagnostic {get{return DescribeReadiness(target)+"; postReadyLossMs="+readinessLoss.LostMilliseconds(CacheClock.ElapsedMilliseconds);}}
+            internal string ReadinessDiagnostic {get{return DescribeReadiness(target)+"; postReadyLossMs="+readinessLoss.LostMilliseconds(CacheClock.ElapsedMilliseconds)+(phase==2?"; "+PlacementGeometry():"");}}
 
             internal CompactPlacement(IntPtr target, Window film, int timeoutMilliseconds = 2000)
             {
@@ -197,7 +198,7 @@ namespace DragonLauncher
                     LauncherDiagnostics.Write("handoff-latest.log","Native placement begin; visible="+IsWindowVisible(target)+
                         "; initialHiddenLease="+(identity.Bound!=null&&HasInitialHiddenLease(target,identity))+
                         "; rectValid="+hasRect+"; target="+initial.Left+","+initial.Top+","+initial.Right+","+initial.Bottom+
-                        "; desired="+desired.Left+","+desired.Top+","+desired.Right+","+desired.Bottom);
+                        "; desired="+desired.Left+","+desired.Top+","+desired.Right+","+desired.Bottom+"; originalShow="+original.ShowCommand+"; zoomed="+IsZoomed(target));
                 }
                 catch(Exception error){Fail(error.Message);}
                 finally {LeavePhysicalCoordinates(previous);}
@@ -264,6 +265,32 @@ namespace DragonLauncher
                 return bounds.Width>=128&&bounds.Height>=128&&bounds.Left>=cover.Left&&bounds.Top>=cover.Top&&
                     bounds.Right<=cover.Right&&bounds.Bottom<=cover.Bottom&&
                     bounds.Left==desired.Left&&bounds.Top==desired.Top&&bounds.Right==desired.Right&&bounds.Bottom==desired.Bottom;
+            }
+
+            private bool HiddenMaximizedPlacementApplied(NativeRect cover)
+            {
+                // A hidden maximized HWND keeps its maximized screen rectangle
+                // until SW_SHOWNOACTIVATE restores it. The exact guard-owned
+                // normal rectangle acknowledges the queued compact placement.
+                // The client may have maximized after our normal snapshot.
+                if((original.ShowCommand!=1&&original.ShowCommand!=3)||!RecoveryArmed||IsWindowVisible(target)||!IsZoomed(target)||
+                    desired.Width<128||desired.Height<128||desired.Left<cover.Left||desired.Top<cover.Top||desired.Right>cover.Right||desired.Bottom>cover.Bottom)return false;
+                var placement=new NativeRestoreGuard.Placement{Length=(uint)Marshal.SizeOf(typeof(NativeRestoreGuard.Placement))};
+                bool confirmed=GetGuardWindowPlacement(target,ref placement)&&NativeRestoreGuard.OwnsPendingMaximizedPlacement(recovery.Record,placement,true,true);
+                if(confirmed)LauncherDiagnostics.Write("handoff-latest.log","Native hidden maximized placement confirmed; originalShow="+original.ShowCommand+
+                    "; capturedShow="+recovery.Record.Show+"; currentShow="+placement.Show+
+                    "; lateMaximized="+(original.ShowCommand==1||recovery.Record.Show==1));
+                return confirmed;
+            }
+
+            private string PlacementGeometry()
+            {
+                NativeRect actual;bool rect=GetWindowRect(target,out actual);
+                NativePlacement placement=new NativePlacement{Length=(uint)Marshal.SizeOf(typeof(NativePlacement))};
+                bool got=GetWindowPlacement(target,ref placement);if(!got){placement.Length=44;got=GetWindowPlacement(target,ref placement);}
+                return "rectRead="+rect+"; actual="+actual.Left+","+actual.Top+","+actual.Right+","+actual.Bottom+
+                    "; desired="+desired.Left+","+desired.Top+","+desired.Right+","+desired.Bottom+"; zoomed="+IsZoomed(target)+
+                    "; placementRead="+got+"; show="+placement.ShowCommand+"; normal="+placement.NormalPosition.Left+","+placement.NormalPosition.Top+","+placement.NormalPosition.Right+","+placement.NormalPosition.Bottom;
             }
 
             private static bool PlacementConfirmationExpired(long queuedAt,long now)
@@ -345,10 +372,12 @@ namespace DragonLauncher
                     if(phase==2)
                     {
                         if(PlacementConfirmationExpired(placementQueuedAt,CacheClock.ElapsedMilliseconds))
-                        {Fail("Compact placement confirmation timed out; phaseMs="+Math.Max(0,CacheClock.ElapsedMilliseconds-placementQueuedAt)+"; budgetMs=3000");return false;}
+                        {Fail("Compact placement confirmation timed out; phaseMs="+Math.Max(0,CacheClock.ElapsedMilliseconds-placementQueuedAt)+"; budgetMs=3000; "+PlacementGeometry());return false;}
                         bool alreadyVisible=IsWindowVisible(target);
                         NativeRect applied,cover;
-                        if(!HiddenPlacementApplied(out applied,out cover))
+                        bool physicalConfirmed=HiddenPlacementApplied(out applied,out cover);
+                        bool maximizedNormalConfirmed=!physicalConfirmed&&HiddenMaximizedPlacementApplied(cover);
+                        if(!physicalConfirmed&&!maximizedNormalConfirmed)
                         {
                             // Even an already matching anchor can belong to the
                             // old rectangle while the resize remains queued.
@@ -358,7 +387,7 @@ namespace DragonLauncher
                             return false;
                         }
                         LauncherDiagnostics.Write("handoff-latest.log","Native hidden placement confirmed; elapsedMs="+PreparationElapsedMilliseconds+
-                            "; alreadyVisible="+alreadyVisible+
+                            "; alreadyVisible="+alreadyVisible+"; maximizedNormalConfirmed="+maximizedNormalConfirmed+
                             "; target="+applied.Left+","+applied.Top+","+applied.Right+","+applied.Bottom+
                             "; cover="+cover.Left+","+cover.Top+","+cover.Right+","+cover.Bottom);
                         // A visible exact rectangle is safe, but another one of
@@ -368,9 +397,12 @@ namespace DragonLauncher
                             if(!ShowWindowAsync(target,4)){Fail("Cannot reveal confirmed compact placement.");return false;}
                             hideShowOrdered=true;
                         }
+                        if(maximizedNormalConfirmed)maximizedRestoreQueuedAt=CacheClock.ElapsedMilliseconds;
                         if(!CompleteInitialHiddenLease(target)){Fail("Cannot release initial hidden-window lease.");return false;}
                         phase=1;return false;
                     }
+                    if(maximizedRestoreQueuedAt>=0&&PlacementConfirmationExpired(maximizedRestoreQueuedAt,CacheClock.ElapsedMilliseconds))
+                    {Fail("Maximized placement restore confirmation timed out; budgetMs=3000; "+PlacementGeometry());return false;}
                     if(!IsReady(target))return false;
                     if(!FitsFilm()){Fail("Application minimum size does not fit the overlay.");return false;}
                     Ready=true;wasReady=true;return true;
@@ -610,6 +642,8 @@ namespace DragonLauncher
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")] private static extern bool IsZoomed(IntPtr hwnd);
+        [DllImport("user32.dll",EntryPoint="GetWindowPlacement")] private static extern bool GetGuardWindowPlacement(IntPtr hwnd,ref NativeRestoreGuard.Placement placement);
         [DllImport("user32.dll")]
         private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
         [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
