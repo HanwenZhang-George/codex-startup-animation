@@ -451,7 +451,8 @@ namespace DragonLauncher
         // before the tear falls. Never turn the impact frame into a loading screen.
         private double preImpactGateStarted = -1, rateUpdatedAt = -1, playbackRate = 1;
         private bool preImpactReleased;
-        private bool livingFailed, userSkipped;
+        private bool livingFailed, userSkipped, resourceSkipped;
+        private bool AnimationSkipped {get{return userSkipped || resourceSkipped;}}
         private double lastFocusAttempt = -1;
         private int focusAttempts;
         private double lastPlacementWaitLog = -1;
@@ -522,11 +523,7 @@ namespace DragonLauncher
                 Dispatcher.BeginInvoke(DispatcherPriority.Send,new Action(delegate {
                     try {
                         if(done||cleaned)return;
-                        if(!preview&&!activationRequested&&settings.ReplayTarget==null){
-                            activationRequested=true;
-                            StartActivationWorker(delegate {return new BridgeResult{Pid=AppActivation.Open(settings),Code="resource-protection-ordinary-launch"};},true);
-                        }
-                        FailLiving("启动资源保护已触发 本次停止动画并保留 Codex");
+                        SkipAnimationCore(true);
                     }finally{if(exitBound!=null)exitBound.Dispose();}
                 }));
             }catch(InvalidOperationException){if(Interlocked.CompareExchange(ref activationClosed,0,0)!=0&&exitBound!=null)exitBound.Dispose();}
@@ -638,6 +635,13 @@ namespace DragonLauncher
             if(targetPreparationFailed){FailLiving("客户端窗口准备失败 已保留 Codex 请查看启动日志",true);return;}
             if(activationError!=null || inputGuardFailed || pulsePreparationFailed){FailLiving("启动准备失败 已保留 Codex 请查看启动日志");return;}
             BridgeStatus state=wallpaperSession==null?null:wallpaperSession.LastStatus;
+            // A brief host-only commit shortage may not trip our independent
+            // one-second monitor. Release the optional movie instead of waiting
+            // behind the cover for the host's thirty-second recovery hysteresis.
+            // This is authenticated suspension evidence, never playback readiness.
+            if(settings.WallpaperEnabled&&settings.ReplayTarget==null&&wallpaperSession!=null&&wallpaperSession.IsPreparationPressureSuspended(state)){
+                OnResourceTrip("wallpaper-commit-pressure");return;
+            }
             if(settings.WallpaperEnabled && wallpaperLookupFinished && wallpaperSession==null){FailLiving("未找到可用的壁纸会话 本次没有播放成功转场");return;}
             // Recoverable renderer rebuild reports MediaCode=2/4. Terminal
             // errors retain >=6; neither state can satisfy prepared evidence.
@@ -814,14 +818,14 @@ namespace DragonLauncher
                     // seconds. An early skip closes the UI immediately, but must
                     // allow its final reveal to outlive that handshake plus
                     // discovery/attestation. The close event publishes skip intent.
-                    int cleanupBudget=userSkipped&&settings.WallpaperEnabled?7000:3000;
+                    int cleanupBudget=AnimationSkipped&&settings.WallpaperEnabled?7000:3000;
                     if(!activationCompleted.WaitOne(cleanupBudget))
                         Log("Activation cleanup bound expired; waitMs="+cleanupBudget+"; explicitSkip="+userSkipped+"; no second client launch");
                 }
             }){IsBackground=false,Name="Bounded activation cleanup"};
             lifetime.Start();
         }
-        private string RevealCommand {get{return living==null || userSkipped ? "reveal" : "commit "+preparation.OperationId;}}
+        private string RevealCommand {get{return living==null || AnimationSkipped ? "reveal" : "commit "+preparation.OperationId;}}
         private void RevealWallpaper()
         {
             if(settings.ReplayTarget!=null)return;
@@ -1070,7 +1074,7 @@ namespace DragonLauncher
             bool mediaReady=WallpaperPrepared();
             if(!mediaReady){DisableUnpreparedWallpaper();if(living!=null)HandoffSucceeded=false;}
             RevealWallpaper();
-            if(targetPlacement!=null)HandoffSucceeded=(living==null ? (HandoffSucceeded || TargetStable()) : (HandoffSucceeded && !livingFailed && !userSkipped)) && targetPlacement.Commit();
+            if(targetPlacement!=null)HandoffSucceeded=(living==null ? (HandoffSucceeded || TargetStable()) : (HandoffSucceeded && !livingFailed && !AnimationSkipped)) && targetPlacement.Commit();
             if(living==null && target!=IntPtr.Zero && !targetFocusPrepared)NativeHandoff.FocusReadyTarget(target);
             BridgeStatus completionStatus=wallpaperSession==null?null:wallpaperSession.LastStatus;
             bool wallpaperCommitted=completionStatus!=null&&completionStatus.CommitAccepted&&completionStatus.PrepareOperationId==preparation.OperationId&&mediaReady;
@@ -1096,17 +1100,26 @@ namespace DragonLauncher
             e.Handled=true;SkipAnimation();
         }
         private void OnCancel(object sender,RoutedEventArgs e){e.Handled=true;if(!cleaned)Close();}
-        private void SkipAnimation()
+        private void SkipAnimation(){SkipAnimationCore(false);}
+        private void SkipAnimationCore(bool resourceProtection)
         {
             if(done || cleaned)return;
             if(preview){done=true;Close();return;}
-            userSkipped=true;HandoffSucceeded=false;EnsureActivation();
+            if(resourceProtection)resourceSkipped=true;else userSkipped=true;
+            HandoffSucceeded=false;
             // Skipping the optional movie is not a failed wallpaper preparation.
             // The Host retains an early reveal until its decoder is ready. Publish
-            // this intent before Close so late activation uses the same command.
+            // this intent before releasing a possibly slow decoder or closing, so
+            // both existing and late sessions retain the same reveal request.
             if(settings.WallpaperEnabled)RevealWallpaper();
+            // OnClosed first restores input/window ownership, then releases the
+            // decoder under its shutdown bound. A blocked decoder must not keep
+            // the input guard alive. The independent Host protection still applies;
+            // a reveal request is not proof of playback or a prior-disable override.
+            EnsureActivation();
             if(targetPlacement!=null)targetPlacement.Commit();
-            Log("Animation explicitly skipped; wallpaper preparation continues; no success finale");
+            Log(resourceProtection ? "Startup animation released for resource protection; wallpaper preparation continues; no success finale" :
+                "Animation explicitly skipped; wallpaper preparation continues; no success finale");
             done=true;Close();
         }
         private void LaunchClose()

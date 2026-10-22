@@ -43,7 +43,7 @@ internal sealed class NativeRestoreGuard:IDisposable {
         [DataMember] public int ScreenTop {get;set;}
         [DataMember] public int ScreenRight {get;set;}
         [DataMember] public int ScreenBottom {get;set;}
-        internal bool PositionRestoreRequested;
+        internal bool PositionRestoreRequested,VisibilityRestoreRequested;
     }
     internal sealed class Lease {
         internal readonly Record Record;
@@ -170,20 +170,25 @@ internal sealed class NativeRestoreGuard:IDisposable {
     private static bool RestorePhysical(Record r){
         if(!Identity(r))return false;IntPtr w=new IntPtr(r.Window);bool restored=true,restorePosition=false;
         Placement current=new Placement{Length=(uint)Marshal.SizeOf(typeof(Placement))};Rect bounds;
-        bool hidden=!IsWindowVisible(w),atOwned=GetWindowRect(w,out bounds)&&bounds.Left==r.ExpectedLeft&&bounds.Top==r.ExpectedTop&&bounds.Right==r.ExpectedRight&&bounds.Bottom==r.ExpectedBottom;
+        bool hidden=!IsWindowVisible(w),minimized=IsIconic(w),atOwned=GetWindowRect(w,out bounds)&&bounds.Left==r.ExpectedLeft&&bounds.Top==r.ExpectedTop&&bounds.Right==r.ExpectedRight&&bounds.Bottom==r.ExpectedBottom;
         if(GetWindowPlacement(w,ref current)){
             bool atOriginal=current.Normal.Left==r.Left&&current.Normal.Top==r.Top&&current.Normal.Right==r.Right&&current.Normal.Bottom==r.Bottom;
-            restorePosition=atOwned||(hidden&&atOriginal);
-            if(restorePosition&&!r.PositionRestoreRequested){current.Flags|=4;current.Show=r.Show;current.Normal=new Rect{Left=r.Left,Top=r.Top,Right=r.Right,Bottom=r.Bottom};restored=SetWindowPlacement(w,ref current);r.PositionRestoreRequested=restored;}
-            // Never move a user-modified window. Hidden state is independently
-            // compensated even when its rectangle has been changed externally.
-            if(hidden)ShowWindowAsync(w,r.Show==0?4:(int)r.Show);
+            restorePosition=!minimized&&(atOwned||(hidden&&atOriginal));
+            if(restorePosition&&!r.PositionRestoreRequested){current.Flags|=4;current.Show=r.Show<=1?4:r.Show==2?7:r.Show;current.Normal=new Rect{Left=r.Left,Top=r.Top,Right=r.Right,Bottom=r.Bottom};restored=SetWindowPlacement(w,ref current);r.PositionRestoreRequested=restored;}
+            // The independent helper cannot read the owner's in-memory hide
+            // requests. A pre-request visible sample can precede an already
+            // queued SW_HIDE, even at the original (not compact) rectangle.
+            // Order one compensation after those requests without moving,
+            // activating, or restoring a window the user has minimized.
+            if(!r.VisibilityRestoreRequested){r.VisibilityRestoreRequested=ShowWindowAsync(w,minimized?7:8);restored=r.VisibilityRestoreRequested&&restored;}
         }else restored=false;
         restored=RestoreTransition(r)&&restored;
-        // Async native requests are not completion. Keep the marker while the
-        // target still has not processed its show; helper cleanup retries with
-        // a small bounded budget, off the animation thread.
-        restored=restored&&IsWindowVisible(w);
+        // There is no target-side acknowledgement for ShowWindowAsync. A
+        // current visible sample (or elapsed time) does not prove that its
+        // queued hide/show events completed. Retain this lease and journal
+        // conservatively; the helper still exits within its existing budget.
+        // Normal successful handoff releases its lease through Commit instead.
+        restored=restored&&!r.VisibilityRestoreRequested&&IsWindowVisible(w);
         if(restorePosition||r.PositionRestoreRequested){
             Placement confirmed=new Placement{Length=(uint)Marshal.SizeOf(typeof(Placement))};Rect actual;
             bool originalPlacement=GetWindowPlacement(w,ref confirmed)&&confirmed.Normal.Left==r.Left&&confirmed.Normal.Top==r.Top&&confirmed.Normal.Right==r.Right&&confirmed.Normal.Bottom==r.Bottom;

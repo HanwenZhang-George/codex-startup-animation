@@ -22,44 +22,54 @@ namespace DragonLauncher
         private readonly string executable;
         private ExistingReplayTarget(IntPtr window,uint pid,long created,string executable)
         {Window=window;this.pid=pid;this.created=created;this.executable=executable;}
-        internal static ExistingReplayTarget Find(Settings settings,string root)
+        private static void LogCandidates(Settings settings,Action<string> log,int phase)
         {
-            IntPtr window=NativeHandoff.FindTarget(settings,0);
-            if(window==IntPtr.Zero){
-                // The official executable started by the wallpaper Host may
-                // have no AppModel identity. Reuse existing read-only bridge
-                // attestation to authorize that exact signed package instance.
-                // Discovery sends only status; no prepare/commit/reveal/disable.
-                using(var session=BridgeActivation.Discover(root,0,null)){
-                    var identity=BridgeClientIdentity.Attest(settings,root,session);
-                    if(identity!=null)NativeHandoff.RegisterBridgeTarget(identity);
-                }
-                window=NativeHandoff.FindTarget(settings,0);
-            }
-            if(window==IntPtr.Zero)return null;
+            try{
+                if(log==null)return;
+                string counts=NativeHandoff.DescribeTargetAvailability(settings);
+                bool valid=System.Text.RegularExpressions.Regex.IsMatch(counts,@"\AverifiedWindows=\d{1,5}; visible=\d{1,5}; hidden=\d{1,5}; cloaked=\d{1,5}; eligible=\d{1,5}\z",System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+                log("replay-native-candidates phase="+phase.ToString(System.Globalization.CultureInfo.InvariantCulture)+" "+(valid?counts:"countsUnavailable=true"));
+            }catch{} // Fixed diagnostic counts must not change window selection.
+        }
+        internal static ExistingReplayTarget Find(Settings settings,string root,Action<string> log=null)
+        {
+            var clock=System.Diagnostics.Stopwatch.StartNew();int phase=1,reason=0;Exception failure=null;
             try {
-                uint processId=BridgeActivation.WindowProcessId(window);
-                if(processId==0||processId>Int32.MaxValue)return null;
-                using(var process=System.Diagnostics.Process.GetProcessById((int)processId)){
-                    long start;IntPtr handle=process.Handle;
-                    if(!BridgeNative.IsAlive(handle)||!BridgeNative.CreationTime(handle,out start))return null;
-                    var result=new ExistingReplayTarget(window,processId,start,BridgeNative.ImagePath(handle));
-                    return result.IsCurrent?result:null;
+                IntPtr window=NativeHandoff.FindTarget(settings,0);LogCandidates(settings,log,phase);
+                if(window==IntPtr.Zero){
+                    // The official executable started by the wallpaper Host may
+                    // have no AppModel identity. Reuse existing read-only bridge
+                    // attestation to authorize that exact signed package instance.
+                    // Discovery sends only status; no prepare/commit/reveal/disable.
+                    phase=2;using(var session=BridgeActivation.Discover(root,0,log)){
+                        phase=3;var identity=BridgeClientIdentity.Attest(settings,root,session,log);
+                        if(identity!=null)NativeHandoff.RegisterBridgeTarget(identity);
+                    }
+                    phase=4;window=NativeHandoff.FindTarget(settings,0);LogCandidates(settings,log,phase);
                 }
-            }catch{return null;}
+                if(window==IntPtr.Zero){reason=1;return null;}
+                phase=5;
+                uint processId=BridgeActivation.WindowProcessId(window);
+                if(processId==0||processId>Int32.MaxValue){reason=2;return null;}
+                using(var process=BridgeNative.OpenReadProcess(processId)){
+                    long start;IntPtr handle=process.DangerousGetHandle();
+                    if(!BridgeNative.IsAlive(handle)||!BridgeNative.CreationTime(handle,out start)){reason=3;return null;}
+                    var result=new ExistingReplayTarget(window,processId,start,BridgeNative.ImagePath(handle));
+                    phase=6;if(!result.IsCurrentCore()){reason=4;return null;}phase=7;return result;
+                }
+            }catch(Exception error){failure=error;reason=5;return null;}
+            finally{BridgeDiagnostics.ReadOnly(log,"find",phase,clock.ElapsedMilliseconds,reason,failure);}
         }
         internal bool IsCurrent
+        {get{try{return IsCurrentCore();}catch{return false;}}}
+        private bool IsCurrentCore()
         {
-            get {
-                if(Window==IntPtr.Zero||pid==0||pid>Int32.MaxValue||created<=0)return false;
-                try {
-                    if(!NativeHandoff.FindCurrentStillValid(Window)||BridgeActivation.WindowProcessId(Window)!=pid)return false;
-                    using(var process=System.Diagnostics.Process.GetProcessById((int)pid)){
-                        long start;IntPtr handle=process.Handle;
-                        return BridgeNative.IsAlive(handle)&&BridgeNative.CreationTime(handle,out start)&&
-                            BridgeClientIdentity.SameSnapshot(pid,created,executable,(uint)process.Id,start,BridgeNative.ImagePath(handle));
-                    }
-                }catch{return false;}
+            if(Window==IntPtr.Zero||pid==0||pid>Int32.MaxValue||created<=0)return false;
+            if(!NativeHandoff.FindCurrentStillValid(Window)||BridgeActivation.WindowProcessId(Window)!=pid)return false;
+            using(var process=BridgeNative.OpenReadProcess(pid)){
+                long start;IntPtr handle=process.DangerousGetHandle();
+                return BridgeNative.IsAlive(handle)&&BridgeNative.CreationTime(handle,out start)&&
+                    BridgeClientIdentity.SameSnapshot(pid,created,executable,pid,start,BridgeNative.ImagePath(handle));
             }
         }
         internal uint Focus()
@@ -388,6 +398,20 @@ namespace DragonLauncher
 namespace DragonLauncher
 {
     // Optional startup visuals have a bounded lifetime and resource budget.
+    // Available physical memory and the Windows low-physical-memory event are
+    // useful observations, not evidence that this process cannot commit memory.
+    // Preserve the existing 512 MiB allocation headroom floor independently.
+    internal static class StartupMemoryPolicy
+    {
+        internal const ulong CriticalCommitBytes=512UL*1024*1024;
+        private const ulong MaximumBytes=281474976710656UL;
+        internal static bool IsCriticalCommit(bool observed,ulong totalCommit,ulong availableCommit)
+        {
+            if(!observed||totalCommit==0||totalCommit>MaximumBytes||availableCommit>totalCommit)
+                throw new IOException("startup-commit-observation-unavailable");
+            return availableCommit<CriticalCommitBytes;
+        }
+    }
     // All thresholds are protective policy, not a measurement of normal usage.
     internal sealed class StartupResourcePolicy
     {
@@ -410,7 +434,7 @@ namespace DragonLauncher
             // scheduler; repeatedly missing 1.5s must not disable the breaker.
             highMemory=lowMemory||bytes>=PrivateLimit?highMemory+(dt>1.5?0.5:dt):0;
             highCpu=dt<=1.5&&deltaCpu/(dt*processors)>CpuLimit?highCpu+dt:0;
-            if(highMemory>=MemoryHoldSeconds)Reason=lowMemory?"system-memory-pressure":"startup-private-memory-limit";
+            if(highMemory>=MemoryHoldSeconds)Reason=lowMemory?"system-commit-pressure":"startup-private-memory-limit";
             else if(highCpu>=CpuHoldSeconds)Reason="startup-sustained-cpu-limit";
             return Reason!=null;
         }
@@ -433,7 +457,7 @@ namespace DragonLauncher
         private int count;
         private static long Bytes(long value){return value>=0&&value<=MaximumBytes?value:-1;}
         internal string Record(long now,double cpu,long privateBytes,long availablePhysical,long totalPhysical,
-            long availableCommit,long totalCommit,int processors,bool lowMemory)
+            long availableCommit,long totalCommit,int processors,bool lowMemory,int notificationLow)
         {
             if(count>=64||now<0||processors<1||processors>4096||(lastAt>=0&&(now<lastAt||now-lastAt<2000)))return null;
             long interval=lastAt<0?0:now-lastAt;
@@ -443,8 +467,8 @@ namespace DragonLauncher
                 cpuPermille=(int)Math.Min(1000,Math.Max(0,Math.Round((cpu-lastCpu)*1000000.0/(interval*(double)processors))));
             lastAt=now;lastCpu=cpu;count++;
             return String.Format(System.Globalization.CultureInfo.InvariantCulture,
-                "Startup resource sample; elapsedMs={0}; intervalMs={1}; cpuPermille={2}; privateBytes={3}; availablePhysicalBytes={4}; totalPhysicalBytes={5}; availableCommitBytes={6}; totalCommitBytes={7}; logicalProcessors={8}; lowMemory={9}",
-                now,interval,cpuPermille,Bytes(privateBytes),Bytes(availablePhysical),Bytes(totalPhysical),Bytes(availableCommit),Bytes(totalCommit),processors,lowMemory?1:0);
+                "Startup resource sample; elapsedMs={0}; intervalMs={1}; cpuPermille={2}; privateBytes={3}; availablePhysicalBytes={4}; totalPhysicalBytes={5}; availableCommitBytes={6}; totalCommitBytes={7}; logicalProcessors={8}; lowMemory={9}; notificationLow={10}",
+                now,interval,cpuPermille,Bytes(privateBytes),Bytes(availablePhysical),Bytes(totalPhysical),Bytes(availableCommit),Bytes(totalCommit),processors,lowMemory?1:0,notificationLow>=0&&notificationLow<=1?notificationLow:-1);
         }
     }
 
@@ -488,15 +512,17 @@ namespace DragonLauncher
                 timer=new System.Threading.Timer(Sample,null,0,500);
             }
         }
-        private bool LowMemory(out MemoryStatus status,out bool memoryAvailable)
+        private bool LowMemory(out MemoryStatus status,out bool memoryAvailable,out int notificationLow)
         {
             status=new MemoryStatus{Length=(uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MemoryStatus))};memoryAvailable=false;
             bool low=false;
             bool notificationValid=notification!=System.IntPtr.Zero&&QueryMemoryResourceNotification(notification,out low);
-            if(notificationValid&&low)return true;
-            if(GlobalMemoryStatusEx(ref status)){memoryAvailable=true;return status.AvailablePhysical<1024UL*1024*1024 || status.AvailablePageFile<512UL*1024*1024;}
-            if(notificationValid)return false;
-            throw new System.IO.IOException("startup-memory-observation-unavailable");
+            notificationLow=notificationValid?(low?1:0):-1;
+            // Always read actual counters, including when Windows reports low
+            // physical memory. That signal is system-wide and does not quantify
+            // this launcher's usage, GPU capacity, or available commit headroom.
+            memoryAvailable=GlobalMemoryStatusEx(ref status);
+            return StartupMemoryPolicy.IsCriticalCommit(memoryAvailable,status.TotalPageFile,status.AvailablePageFile);
         }
         private void Sample(object ignored)
         {
@@ -506,12 +532,12 @@ namespace DragonLauncher
                 if(disposed||policy.Reason!=null||samplingHealth.Tripped)return;
                 using(var process=System.Diagnostics.Process.GetCurrentProcess()){
                     double now=clock.Elapsed.TotalSeconds,cpu=process.TotalProcessorTime.TotalSeconds;long bytes=process.PrivateMemorySize64;
-                    MemoryStatus memory;bool memoryAvailable;bool low=LowMemory(out memory,out memoryAvailable);
+                    MemoryStatus memory;bool memoryAvailable;int notificationLow;bool low=LowMemory(out memory,out memoryAvailable,out notificationLow);
                     if(policy.Evaluate(now,cpu,bytes,low))reason=policy.Reason;
                     samplingHealth.Record(true);
                     try{sample=diagnostics.Record((long)(now*1000),cpu,bytes,memoryAvailable?(long)memory.AvailablePhysical:-1,
                         memoryAvailable?(long)memory.TotalPhysical:-1,memoryAvailable?(long)memory.AvailablePageFile:-1,
-                        memoryAvailable?(long)memory.TotalPageFile:-1,System.Environment.ProcessorCount,low);}catch{}
+                        memoryAvailable?(long)memory.TotalPageFile:-1,System.Environment.ProcessorCount,low,notificationLow);}catch{}
                 }
             }catch(System.Exception e){
                 if(!sampleErrorLogged){sampleErrorLogged=true;LauncherDiagnostics.Write("handoff-latest.log","Startup resource sample unavailable: "+e.GetType().Name);}

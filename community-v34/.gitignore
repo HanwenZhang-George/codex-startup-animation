@@ -15,6 +15,10 @@ wallpaper-host-config.json
 wallpaper-host-session.json
 install-state.json
 diagnostics/
+!packaging/Diagnostics/
+!packaging/Diagnostics/*
+Diagnostics/Reports/
+CodexDiagnosticReports/
 dist/
 build/
 output/

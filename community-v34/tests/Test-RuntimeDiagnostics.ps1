@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$OutputDirectory)
+﻿param([Parameter(Mandatory=$true)][string]$OutputDirectory)
 $ErrorActionPreference='Stop'
 $sourceRoot=Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $output=[IO.Path]::GetFullPath($OutputDirectory)

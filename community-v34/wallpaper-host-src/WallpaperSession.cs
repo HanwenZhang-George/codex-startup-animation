@@ -8,40 +8,28 @@ using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace CodexDragonWallpaper {
-// Resource notifications are level-triggered. Wait only for the opposite
-// state, and require a 30 s recovery cooldown before consulting the high event.
-// Two notification handles share the existing session worker. If notification
-// APIs fail, memory status is sampled on that same worker's bounded waits;
-// there is no extra timer thread or ownership of the client's CDP handles.
+// Physical-memory notification is not an allocation limit. Windows can keep
+// it signaled while this process still has ample available commit. Sample the
+// actual commit headroom on the existing worker; no extra thread or decoder.
 internal sealed class MemoryPressureMonitor : IDisposable {
-    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr CreateMemoryResourceNotification(int type);
-    [DllImport("kernel32.dll",SetLastError=true)] static extern bool QueryMemoryResourceNotification(SafeWaitHandle handle,out bool signaled);
-    sealed class ResourceWait : WaitHandle {internal ResourceWait(IntPtr value){SafeWaitHandle=new SafeWaitHandle(value,true);}}
     [StructLayout(LayoutKind.Sequential)] internal struct MemoryStatus {internal uint Length,Load;internal ulong TotalPhysical,AvailablePhysical,TotalPageFile,AvailablePageFile,TotalVirtual,AvailableVirtual,AvailableExtendedVirtual;}
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
     readonly WaitHandle low,high; readonly Func<bool> readLow,readHigh; readonly WaitHandle[] normal,pressured;readonly Func<int> fallback;int mismatches;bool fallbackOnly;
+    internal long AvailableCommitBytes=-1,TotalCommitBytes=-1;
+    private MemoryPressureMonitor(WaitHandle work){normal=new[]{work,(WaitHandle)null};pressured=normal;fallbackOnly=true;fallback=ReadCommit;}
     internal MemoryPressureMonitor(WaitHandle work,WaitHandle low,WaitHandle high,Func<bool> query):this(work,low,high,query,()=>high.WaitOne(0)){}
     internal MemoryPressureMonitor(WaitHandle work,WaitHandle low,WaitHandle high,Func<bool> query,Func<bool> highQuery):this(work,low,high,query,highQuery,null){}
     internal MemoryPressureMonitor(WaitHandle work,WaitHandle low,WaitHandle high,Func<bool> query,Func<bool> highQuery,Func<int> fallbackQuery){this.low=low;this.high=high;readLow=query;readHigh=highQuery;fallback=fallbackQuery;fallbackOnly=low==null||high==null;normal=new[]{work,low};pressured=new[]{work,high};}
-    // Only used if Windows notification creation/query fails. These are
-    // conservative physical/available-commit headroom thresholds, not a
-    // per-client RAM budget (Windows may report a lower process commit limit).
-    // Preserve a neutral band and the existing 30 s recovery hysteresis.
+    // ullAvailPageFile is the commit headroom available to this process, which
+    // can be lower than the system-wide value. Keep the existing startup
+    // critical floor, a distinct recovery level and 30 s recovery hysteresis.
     internal static int FallbackState(ulong total,ulong available,ulong commit,ulong commitAvailable){
-        if(total==0||commit==0||available>total||commitAvailable>commit)throw new HostFailure(71);
-        if(available<=total/20||commitAvailable<=commit/50)return 1;
-        return available>=total/10&&commitAvailable>=commit/20?2:0;
+        if(commit==0||commitAvailable>commit)throw new HostFailure(71);
+        if(commitAvailable<512UL*1024*1024)return 1;
+        return commitAvailable>=1024UL*1024*1024?2:0;
     }
-    static int ReadFallback(){var status=new MemoryStatus{Length=(uint)Marshal.SizeOf(typeof(MemoryStatus))};if(!GlobalMemoryStatusEx(ref status))throw new HostFailure(71);return FallbackState(status.TotalPhysical,status.AvailablePhysical,status.TotalPageFile,status.AvailablePageFile);}
-    internal static MemoryPressureMonitor Create(WaitHandle work){
-        ResourceWait low=null,high=null;
-        try{
-            IntPtr value=CreateMemoryResourceNotification(0);if(value==IntPtr.Zero||value==new IntPtr(-1))throw new HostFailure(71);low=new ResourceWait(value);
-            value=CreateMemoryResourceNotification(1);if(value==IntPtr.Zero||value==new IntPtr(-1))throw new HostFailure(71);high=new ResourceWait(value);
-            ResourceWait queryHandle=low,highHandle=high;
-            return new MemoryPressureMonitor(work,low,high,()=>{bool active;if(!QueryMemoryResourceNotification(queryHandle.SafeWaitHandle,out active))throw new HostFailure(71);return active;},()=>{bool active;if(!QueryMemoryResourceNotification(highHandle.SafeWaitHandle,out active))throw new HostFailure(71);return active;},ReadFallback);
-        }catch{if(low!=null)low.Dispose();if(high!=null)high.Dispose();return new MemoryPressureMonitor(work,null,null,null,null,ReadFallback);}
-    }
+    int ReadCommit(){var status=new MemoryStatus{Length=(uint)Marshal.SizeOf(typeof(MemoryStatus))};if(!GlobalMemoryStatusEx(ref status))throw new HostFailure(71);int value=FallbackState(status.TotalPhysical,status.AvailablePhysical,status.TotalPageFile,status.AvailablePageFile);AvailableCommitBytes=status.AvailablePageFile<=281474976710656UL?(long)status.AvailablePageFile:-1;TotalCommitBytes=status.TotalPageFile<=281474976710656UL?(long)status.TotalPageFile:-1;return value;}
+    internal static MemoryPressureMonitor Create(WaitHandle work){return new MemoryPressureMonitor(work);}
     bool Read(bool highQuery){if(!fallbackOnly){try{return highQuery?readHigh():readLow();}catch{if(fallback==null)throw;fallbackOnly=true;}}if(fallback==null)throw new HostFailure(71);return (fallback()&(highQuery?2:1))!=0;}
     internal bool IsLow(){return Read(false);}
     internal bool IsHigh(){return Read(true);}
@@ -52,7 +40,15 @@ internal sealed class MemoryPressureMonitor : IDisposable {
         if(signal==1&&!expected){mismatches=Math.Min(6,mismatches+1);normal[0].WaitOne(Math.Min(1000,25<<mismatches));}else mismatches=0;
     }
     internal int Wait(bool underPressure,int cooldownRemaining){
-        if(fallbackOnly)return normal[0].WaitOne(cooldownRemaining>0?Math.Min(15000,cooldownRemaining):15000)?0:2;
+        if(fallbackOnly){
+            // Check commit cheaply at most once per second, but keep the
+            // existing 15 s controller heartbeat when the state is unchanged.
+            // A permanently signaled physical notification cannot spin here.
+            var clock=Stopwatch.StartNew();int budget=cooldownRemaining>0?Math.Min(15000,cooldownRemaining):15000;
+            bool initial=underPressure?IsHigh():IsLow();if(initial&&cooldownRemaining<=0)return 2;
+            for(;;){int left=Deadline.Remaining(budget,clock.ElapsedMilliseconds);if(left<=0)return 2;if(normal[0].WaitOne(Math.Min(1000,left)))return 0;
+                if((underPressure?IsHigh():IsLow())!=initial)return 2;}
+        }
         if(underPressure&&cooldownRemaining>0){int result=WaitHandle.WaitAny(normal,cooldownRemaining);return result==WaitHandle.WaitTimeout?2:result;}
         int index=WaitHandle.WaitAny(underPressure?pressured:normal,15000);return index==WaitHandle.WaitTimeout?2:index;
     }
@@ -97,11 +93,23 @@ internal static class MediaFileBinding {
 }
 internal sealed class WallpaperSession {
     readonly CdpTransport cdp;readonly HostState state;readonly Configuration config;readonly bool isolated;string session;bool installed,disposed;int phase;
+    readonly Func<WaitHandle,MemoryPressureMonitor> memoryFactory=MemoryPressureMonitor.Create;
     readonly Stopwatch preparationClock=Stopwatch.StartNew();volatile bool transportLost,targetLost;long observationStarted,observationReceived;MemoryPressureMonitor preparationMemory;
+    bool mediaAttachStarted,preparationPressured;
+    sealed class PreparationSuspended:Exception {}
     readonly PreparationSnapshotRecorder preparationSnapshots=new PreparationSnapshotRecorder();
     readonly RotationSnapshotRecorder rotationSnapshots=new RotationSnapshotRecorder();
     readonly RuntimeSnapshotRecorder runtimeSnapshots=new RuntimeSnapshotRecorder();
-    void CheckPreparationResources(){if(preparationMemory!=null&&preparationMemory.IsLow())throw new HostFailure(74);}
+    void CheckPreparationResources(){if(mediaAttachStarted&&preparationMemory!=null&&preparationMemory.IsLow()){SuspendPreparation();throw new PreparationSuspended();}}
+    void SuspendPreparation(){
+        if(preparationPressured||Disabled)return;
+        string trustedSession=session,generation=state.DocumentGeneration;
+        if(!PreparationContextCurrent(trustedSession,generation))return;
+        if(!Json.Bool(Eval(Key+".memoryPressure(true)",false,1500),"ok"))throw new HostFailure(71);
+        if(!PreparationContextCurrent(trustedSession,generation))return;
+        preparationPressured=true;RecordPressure("suspended",preparationMemory);
+    }
+    void RecordPressure(string value,MemoryPressureMonitor memory){PreparationDiagnostics.RecordMemoryPressure(value,preparationClock.ElapsedMilliseconds,memory==null?-1:memory.AvailableCommitBytes,memory==null?-1:memory.TotalCommitBytes);}
     void SetPhase(int next){if(phase==next)return;phase=next;PreparationDiagnostics.Record(phase,preparationClock.ElapsedMilliseconds,0);}
     const string Key="window.__codexDragonWallpaperV1";
     const string RootReady="(() => ({rootReady:!!document.getElementById('root'),bodyReady:!!document.body}))()";
@@ -267,6 +275,21 @@ internal sealed class WallpaperSession {
         if(!Regex.IsMatch(session??"","^[A-Za-z0-9_-]{1,128}$"))throw new HostFailure(62);
     }
     void Prepare(){
+        try{PrepareCore();}
+        catch(PreparationSuspended){
+            if(Disabled)return;
+            string trustedSession=session,generation=state.DocumentGeneration;
+            if(!PreparationContextCurrent(trustedSession,generation))return;
+            var paused=Eval(Key+".status()",false,1500);
+            if(!PreparationContextCurrent(trustedSession,generation))return;
+            if(!Json.Bool(paused,"attached")||!Json.Bool(paused,"dormant")||!Json.Bool(paused,"memoryPressure")||Json.Bool(paused,"mediaReady")||Json.Bool(paused,"playing")||Json.Bool(paused,"wallpaperApplied")||Json.Bool(paused,"disposed"))throw new HostFailure(70);
+            UpdateStatus(paused);preparationSnapshots.Observe(paused,state.DocumentGeneration,preparationClock.ElapsedMilliseconds);
+            lock(state.Gate){if(!state.Disabled)state.RefreshAvailable=true;}
+            // The same authenticated document/attach enters the ordinary
+            // controller loop. No injection, file binding or attach is replayed.
+        }
+    }
+    void PrepareCore(){
         CheckPreparationResources();
         SetPhase(1);SelectTarget();SetPhase(2);var shellClock=Stopwatch.StartNew();var clock=Stopwatch.StartNew();bool rootReady=false;HostFailure lastGuard=null;
         while(clock.ElapsedMilliseconds<4000&&!Disabled){
@@ -318,11 +341,18 @@ internal sealed class WallpaperSession {
         if(mediaFallback)PreparationDiagnostics.RecordMediaBindingFallback(preparationClock.ElapsedMilliseconds,true);
         if(Disabled)return;
         CheckPreparationResources();SetPhase(10);clock.Restart();
+        // All light identity/layout/file checks retain their original bounds.
+        // Critical commit gates the decoder, not the verified control channel.
+        // attach honours this pre-set pressure by retaining File without src.
+        if(preparationMemory!=null&&preparationMemory.IsLow())SuspendPreparation();
+        if(Disabled)return;
         // Never hold an 8.5 s awaitPromise call while memory pressure or disable
         // is waiting. Start exactly one attach and observe its existing state;
         // the initial-frame deadline remains bounded and no extra thread is used.
         var started=Eval("(() => {"+Key+(isolated?".attach({deferReveal:true,mediaProbe:true})":".attach({deferReveal:true})")+".catch(() => {});return {ok:true};})()",false,1500);
         if(!Json.Bool(started,"ok"))throw new HostFailure(68);
+        mediaAttachStarted=true;
+        if(preparationPressured)throw new PreparationSuspended();
         Dictionary<string,object> status=null;
         for(;;){
             if(Disabled)return;CheckPreparationResources();int left=Deadline.Remaining(8500,clock.ElapsedMilliseconds);if(left<=0)throw new HostFailure(68);
@@ -366,7 +396,7 @@ internal sealed class WallpaperSession {
             !Json.Bool(status,"attached")&&!Json.Bool(status,"mediaReady")&&!Json.Bool(status,"prepared")&&!Json.Bool(status,"disposed")&&!Json.Bool(status,"playing")&&!Json.Bool(status,"wallpaperApplied");
     }
     void UpdateStatus(Dictionary<string,object> status){
-        foreach(string field in new[]{"attached","mediaReady","prepared","disposed","playing","wallpaperApplied","revealed","layoutSupported","manuallyPaused","probeOnly","firstFrameConfirmed","documentHidden","stageVisible"})if(!(Json.Get(status,field) is bool))throw new HostFailure(70);
+        foreach(string field in new[]{"attached","mediaReady","prepared","disposed","playing","wallpaperApplied","revealed","layoutSupported","manuallyPaused","probeOnly","firstFrameConfirmed","documentHidden","stageVisible","memoryPressure"})if(!(Json.Get(status,field) is bool))throw new HostFailure(70);
         string code=Json.Text(status,"code");if(String.IsNullOrEmpty(code)||code.Length>32)throw new HostFailure(70);
         object time=Json.Get(status,"mediaTimeMs");if(!(time is int)&&!(time is long))throw new HostFailure(70);
         long milliseconds=Json.Number(status,"mediaTimeMs");if(milliseconds<0||milliseconds>86400000)throw new HostFailure(70);
@@ -388,7 +418,7 @@ internal sealed class WallpaperSession {
             state.Ready=ready;state.Revealed=revealed;state.MediaCode=mediaCode;
             state.DiagnosticsVersion=1;state.LayoutSupported=layout;state.ProbeOnly=probe;state.Attached=attached;
             state.Playing=playing;state.WallpaperApplied=applied;state.FirstFrameConfirmed=firstFrame;
-            state.DocumentHidden=hidden;state.StageVisible=visible;state.MediaTimeMs=(int)milliseconds;
+            state.DocumentHidden=hidden;state.StageVisible=visible;state.MemoryPressure=Json.Bool(status,"memoryPressure");state.MediaTimeMs=(int)milliseconds;
             state.MediaGeneration=mediaGeneration;state.ActualPhase=actualPhase;state.Health=health;state.Reason=reason;
             state.Prepared=ready;state.PrepareOperationId=operation;state.CommitAccepted=committed;
             state.ObservedAt=observationStarted;state.Sequence++;
@@ -424,17 +454,17 @@ internal sealed class WallpaperSession {
         try{
             cdp.Signal+=OnSignal;
             lock(state.Gate){if(!config.Enabled)state.Disabled=true;state.MediaCode=2;}
-            memory=MemoryPressureMonitor.Create(state.Work);preparationMemory=memory;
+            memory=memoryFactory(state.Work);preparationMemory=memory;
             if(!Disabled)Prepare();
-            preparationMemory=null;var pressure=new MemoryPressurePolicy();var clock=Stopwatch.StartNew();bool appliedPressure=false;
+            preparationMemory=null;var pressure=new MemoryPressurePolicy{Pressured=preparationPressured};var clock=Stopwatch.StartNew();bool appliedPressure=preparationPressured;
             for(;;){
                 bool disable,reveal,pause;long refresh,operation,intent;string prepare,commit;
                 lock(state.Gate){disable=state.Disabled;reveal=state.RequestedReveal;pause=state.RequestedPause;state.RequestedReveal=false;state.RequestedPause=false;refresh=state.RefreshRequested>state.RefreshTaken?state.RefreshRequested:0;if(refresh>0)state.RefreshTaken=refresh;prepare=state.RequestedPrepare;commit=state.RequestedCommit;state.RequestedPrepare=state.RequestedCommit=null;operation=state.OperationRequested;intent=state.IntentRevision;}
                 if(transportLost||targetLost||cdp.Faulted)throw new HostFailure(72);
                 if(disable){DisposeRenderer();lock(state.Gate){state.Ready=false;state.MediaCode=6;state.Disabled=true;state.ClearDiagnostics();}return;}
                 if(memory!=null){
-                    bool low=memory.IsLow(),high=memory.IsHigh();pressure.Update(low,high,clock.ElapsedMilliseconds);
-                    if(pressure.Pressured!=appliedPressure&&(pressure.Pressured?!Disabled:MutationAllowed(intent))){if(!Json.Bool(Eval(Key+".memoryPressure("+(pressure.Pressured?"true":"false")+")",false,1500),"ok"))throw new HostFailure(71);appliedPressure=pressure.Pressured;}
+                    bool low=memory.IsLow(),high=!low&&memory.IsHigh();pressure.Update(low,high,clock.ElapsedMilliseconds);
+                    if(pressure.Pressured!=appliedPressure&&(pressure.Pressured?!Disabled:MutationAllowed(intent))){if(!Json.Bool(Eval(Key+".memoryPressure("+(pressure.Pressured?"true":"false")+")",false,1500),"ok"))throw new HostFailure(71);appliedPressure=pressure.Pressured;RecordPressure(appliedPressure?"suspended":"resume-requested",memory);}
                 }
                 if(MutationAllowed(intent)&&prepare==null&&commit==null){
                     var renewed=RuntimeRead(Key+".renewLease('"+state.DocumentGeneration+"')",intent);

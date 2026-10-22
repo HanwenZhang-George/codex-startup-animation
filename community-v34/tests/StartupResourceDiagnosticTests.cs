@@ -14,12 +14,12 @@ namespace DragonLauncher
         static readonly BindingFlags AnyInstance=BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic;
         static void Check(bool condition,string message){if(!condition)throw new Exception(message);passed++;}
         static object NewDiagnostics(){return Activator.CreateInstance(diagnosticType,true);}
-        static string Record(object value,long now,double cpu,long bytes,long available,long total,long commitAvailable,long commit,bool low)
-        {return (string)diagnosticType.GetMethod("Record",AnyInstance).Invoke(value,new object[]{now,cpu,bytes,available,total,commitAvailable,commit,4,low});}
+        static string Record(object value,long now,double cpu,long bytes,long available,long total,long commitAvailable,long commit,bool low,int notificationLow=-1)
+        {return (string)diagnosticType.GetMethod("Record",AnyInstance).Invoke(value,new object[]{now,cpu,bytes,available,total,commitAvailable,commit,4,low,notificationLow});}
         static Dictionary<string,long> Parse(string text)
         {
             Check(text!=null&&text.Length<512,"Bounded diagnostic line");
-            Check(Regex.IsMatch(text,@"\AStartup resource sample; elapsedMs=\d+; intervalMs=\d+; cpuPermille=-?\d+; privateBytes=-?\d+; availablePhysicalBytes=-?\d+; totalPhysicalBytes=-?\d+; availableCommitBytes=-?\d+; totalCommitBytes=-?\d+; logicalProcessors=\d+; lowMemory=[01]\z"),"Fixed numeric-only diagnostic fields");
+            Check(Regex.IsMatch(text,@"\AStartup resource sample; elapsedMs=\d+; intervalMs=\d+; cpuPermille=-?\d+; privateBytes=-?\d+; availablePhysicalBytes=-?\d+; totalPhysicalBytes=-?\d+; availableCommitBytes=-?\d+; totalCommitBytes=-?\d+; logicalProcessors=\d+; lowMemory=[01]; notificationLow=(?:-1|0|1)\z"),"Fixed numeric-only diagnostic fields");
             var result=new Dictionary<string,long>();foreach(Match item in Regex.Matches(text,@"(?<name>[A-Za-z]+)=(?<value>-?\d+)"))result[item.Groups["name"].Value]=long.Parse(item.Groups["value"].Value,CultureInfo.InvariantCulture);return result;
         }
         static StartupResourceBreaker Breaker(Action<string> trip,Action<string> output)
@@ -35,6 +35,9 @@ namespace DragonLauncher
             var second=Parse(Record(value,2000,14,101,201,301,401,501,true));
             Check(second["cpuPermille"]==500&&second["intervalMs"]==2000,"CPU delta normalized across logical processors");
             Check(second["lowMemory"]==1&&second["privateBytes"]==101&&second["availablePhysicalBytes"]==201&&second["totalPhysicalBytes"]==301,"Sample preserves observed counters");
+            var physical=Parse(Record(NewDiagnostics(),0,1,100,200,300,400,500,false,1));
+            Check(physical["lowMemory"]==0&&physical["notificationLow"]==1&&physical["availablePhysicalBytes"]==200&&physical["availableCommitBytes"]==400,"Physical notification never suppresses numeric counters or fabricates commit pressure");
+            Check(Parse(Record(NewDiagnostics(),0,1,100,200,300,400,500,false,2))["notificationLow"]==-1,"Malformed notification state becomes unknown");
             Check(Record(value,1000,15,0,0,0,0,0,false)==null,"Clock reversal cannot burst diagnostics");
             var missing=Parse(Record(value,4000,double.NaN,-1,-1,-1,-1,-1,false));
             Check(missing["cpuPermille"]==-1&&missing["availablePhysicalBytes"]==-1,"Unknown counters retained as minus one");

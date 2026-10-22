@@ -19,7 +19,7 @@ internal sealed class HostState {
     internal int Disposition,CodexPid,MediaCode;internal long Created;
     internal bool Ready,Revealed,Disabled,RequestedReveal,RequestedPause,RevealEverRequested;
     internal int DiagnosticsVersion,MediaTimeMs;
-    internal bool LayoutSupported,ProbeOnly,Attached,Playing,WallpaperApplied,FirstFrameConfirmed,DocumentHidden,StageVisible;
+    internal bool LayoutSupported,ProbeOnly,Attached,Playing,WallpaperApplied,FirstFrameConfirmed,DocumentHidden,StageVisible,MemoryPressure;
     internal bool RefreshAvailable;internal long RefreshRequested,RefreshTaken,RefreshCompleted;int refreshResult;
     internal readonly string DocumentGeneration=Guid.NewGuid().ToString("N");
     internal long MediaGeneration,ObservedAt,Sequence,RendererClockMs,RendererSampleReceived;internal string ActualPhase="preparing",Health="stale",DesiredMode="enabled",Reason="",PrepareOperationId="";
@@ -31,8 +31,8 @@ internal sealed class HostState {
     internal string Snapshot(){return Snapshot(0);}
     string Snapshot(int refreshCode){lock(Gate){long age=ObservedAt==0?86400000:Math.Min(86400000,Math.Max(0,(Stopwatch.GetTimestamp()-ObservedAt)*1000/Stopwatch.Frequency));return Json.Serializer().Serialize(Json.Obj("version",1,"protocolVersion",2,"documentGeneration",DocumentGeneration,"mediaGeneration",MediaGeneration,"observationAgeMs",age,"actualPhase",ActualPhase,"health",age>30000&&Health=="fresh"?"stale":Health,"desiredMode",DesiredMode,"reason",Reason,"sequence",Sequence,"prepareOperationId",PrepareOperationId,"prepared",Prepared,"commitAccepted",CommitAccepted,
         "disposition",Disposition,"hostPid",HostPid,"hostCreationFileTime",HostCreated,"codexPid",CodexPid,"creationFileTime",Created,"mediaCode",MediaCode,"ready",Ready&&age<=30000,"revealed",Revealed,"disabled",Disabled,"refreshCode",refreshCode,
-        "diagnosticsVersion",DiagnosticsVersion,"layoutSupported",LayoutSupported,"probeOnly",ProbeOnly,"attached",Attached,"playing",Playing,"wallpaperApplied",WallpaperApplied,"firstFrameConfirmed",FirstFrameConfirmed,"documentHidden",DocumentHidden,"stageVisible",StageVisible,"mediaTimeMs",MediaTimeMs));}}
-    internal void ClearDiagnostics(){lock(Gate){DiagnosticsVersion=0;MediaTimeMs=0;LayoutSupported=ProbeOnly=Attached=Playing=WallpaperApplied=FirstFrameConfirmed=DocumentHidden=StageVisible=false;}}
+        "diagnosticsVersion",DiagnosticsVersion,"layoutSupported",LayoutSupported,"probeOnly",ProbeOnly,"attached",Attached,"playing",Playing,"wallpaperApplied",WallpaperApplied,"firstFrameConfirmed",FirstFrameConfirmed,"documentHidden",DocumentHidden,"stageVisible",StageVisible,"memoryPressure",MemoryPressure,"mediaTimeMs",MediaTimeMs));}}
+    internal void ClearDiagnostics(){lock(Gate){DiagnosticsVersion=0;MediaTimeMs=0;LayoutSupported=ProbeOnly=Attached=Playing=WallpaperApplied=FirstFrameConfirmed=DocumentHidden=StageVisible=MemoryPressure=false;}}
     internal string RefreshSnapshot(int timeout){lock(Gate){
         // status remains an immediate startup snapshot. Only this explicit
         // user command waits for one fixed, guarded renderer status query.

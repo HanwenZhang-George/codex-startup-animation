@@ -10,7 +10,7 @@
     return { ok: false, code: 'element-conflict' };
   }
   const root = document.getElementById('root');
-  if (!root || !document.body) return { ok: false, code: 'unsupported-layout' };
+  if (!root || !document.body) return { ok: false, code: 'unsupported-layout', layoutReason: 'root-missing' };
   const marker = 'data-codex-dragon-background';
   const previousMarker = document.documentElement.getAttribute(marker);
   const style = document.createElement('style');
@@ -18,7 +18,7 @@
   const styleTemplate = `
 /* Continuous wallpaper with clear window chrome. Keep text and controls opaque;
    only the audited background surfaces are transparent. */
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root {
+html[data-codex-dragon-background="v1"] #root {
   position: relative;
   isolation: isolate;
   --dragon-glass-panel: color-mix(in srgb, var(--color-surface, #1d1e2c) 18%, transparent);
@@ -27,7 +27,7 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
   --dragon-glass-blur: blur(12px);
   --dragon-chrome-text-shadow: 0 1px 2px rgb(0 0 0 / 35%);
 }
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root :is(
+html[data-codex-dragon-background="v1"] #root :is(
   [data-app-shell-frame],
   ._Workspace_yl8z4_2,
   main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"],
@@ -36,7 +36,7 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
 ) { background-color: transparent !important; }
 
 /* The list gets a thin tint, with no blur or per-row compositing surface. */
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root :is(
+html[data-codex-dragon-background="v1"] #root :is(
   .app-shell-left-panel .sidebar-navigation:not(.sidebar-navigation .sidebar-navigation),
   nav[data-app-navigation-rail]
 ) {
@@ -45,12 +45,12 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
   backdrop-filter: none !important;
   text-shadow: var(--dragon-chrome-text-shadow);
 }
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root .app-shell-left-panel .sidebar-navigation .sidebar-navigation {
+html[data-codex-dragon-background="v1"] #root .app-shell-left-panel .sidebar-navigation .sidebar-navigation {
   background-color: transparent !important;
 }
 
 /* No frosted horizontal strip across the menu or conversation title. */
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root :is(
+html[data-codex-dragon-background="v1"] #root :is(
   ._ApplicationMenuTopBar_yl8z4_2,
   ._FloatingHeader_yl8z4_2,
   [data-app-shell-titlebar][data-pip-obstacle="app-shell-header"],
@@ -64,13 +64,13 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
 
 /* Native decoration also paints a separate surface-to-clear fade. Leave its
    geometry and the scrolled header divider intact, clearing only its paint. */
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root ._MainContentTopFade_yl8z4_2 {
+html[data-codex-dragon-background="v1"] #root ._MainContentTopFade_yl8z4_2 {
   background-image: none !important;
   background-color: transparent !important;
 }
 
 /* The composer keeps its existing reading surface and drag-target behavior. */
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main[data-app-shell-main-surface="default"] ._ComposerLayoutRoot_boifs_2:is(
+html[data-codex-dragon-background="v1"] #root main[data-app-shell-main-surface="default"] ._ComposerLayoutRoot_boifs_2:is(
   [data-composer-surface-variant="default"],
   [data-composer-surface-variant="opaque"],
   [data-composer-surface-variant="secondary"]
@@ -80,25 +80,26 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
 }
 
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
-  html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root {
+  html[data-codex-dragon-background="v1"] #root {
     --dragon-glass-panel: var(--color-surface, Canvas);
     --dragon-glass-header: var(--color-surface, Canvas);
     --dragon-glass-input: var(--color-surface-elevated-secondary, Canvas);
     --dragon-glass-blur: none;
     --dragon-chrome-text-shadow: none;
   }
-  html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root [data-app-shell-frame] {
+  /* Match the ID specificity of the transparent shell rule above. */
+  html[data-codex-dragon-background="v1"] #root :is([data-app-shell-frame], #app-shell-sidebar) {
     background-color: var(--color-surface, Canvas) !important;
   }
 }
 
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2::before { background-color: transparent !important; }
+html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2::before { background-color: transparent !important; }
 /* Clear only verified footer decorations. Glass variables style the composer;
    menus and controls retain their native behavior. Removing the marker restores
    the client's original backgrounds without changing its DOM or layout. */
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 [data-thread-scroll-footer="true"] > div[aria-hidden="true"].pointer-events-none.absolute.inset-x-0.z-0.bottom-0.bg-surface { background-color: transparent !important; }
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 .thread-scroll-container > div > div[aria-hidden="true"].pointer-events-none.sticky.bottom-0.z-10 > div[aria-hidden="true"].pointer-events-none.absolute.inset-x-0.z-0.from-surface { background-image: none !important; }
-html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 [data-thread-scroll-footer="true"]:has([data-thread-focus-mode]) { background-color: transparent !important; }
+html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 [data-thread-scroll-footer="true"] > div[aria-hidden="true"].pointer-events-none.absolute.inset-x-0.z-0.bottom-0.bg-surface { background-color: transparent !important; }
+html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 .thread-scroll-container > div > div[aria-hidden="true"].pointer-events-none.sticky.bottom-0.z-10 > div[aria-hidden="true"].pointer-events-none.absolute.inset-x-0.z-0.from-surface { background-image: none !important; }
+html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2 [data-thread-scroll-footer="true"]:has([data-thread-focus-mode]) { background-color: transparent !important; }
 #codex-dragon-stage-v1 { position: absolute; inset: 0; z-index: -20; pointer-events: none; overflow: hidden; background: var(--color-surface, #101518); contain: strict; }
 #codex-dragon-stage-v1 video { width: 100%; height: 100%; object-fit: cover; object-position: right center; opacity: 0; }
 #codex-dragon-stage-v1[data-ready="true"] video { opacity: .26; animation: codex-dragon-reveal-v1 650ms ease both; }
@@ -122,6 +123,7 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
   let disposed = false, attached = false, playing = false, code = 'idle';
   let objectUrl = null, generation = 0, frameRevision = 0, timer = null, frame = null, settlePending = null;
   let loaded = null, markerApplied = false, layoutSupported = false, mediaReady = false;
+  let layoutReason = 'not-checked';
   let firstFrameConfirmed = false, playStarted = false, probeOnly = false;
   let pauseRevision = 0, playAttempt = 0;
   let deferred = false, revealRequested = false, revealed = false, manuallyPaused = false;
@@ -334,7 +336,7 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
   }
   const mainSelector = '#root main[data-app-shell-main-surface="default"]';
   const shellComponents = ['Layout', 'Workspace', 'MainContentClip', 'LeftPanel', 'ApplicationMenuTopBar', 'FloatingHeader', 'MainContentTopFade'];
-  let styleBinding = '', bindingMain = null, bindingCore = '', bindingsDirty = true;
+  let styleBinding = '', bindingMain = null, bindingCore = '', bindingComposer = '', bindingsDirty = true;
   let boundShellNodes = [], watchedShellNodes = [];
   function componentToken(node, name) {
     const prefix = '_' + name + '_';
@@ -347,8 +349,22 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
   }
   function bindSurfaceStyle(main, workspace, mainToken, workspaceToken) {
     const core = mainToken.token + ' ' + workspaceToken.token;
-    if (!bindingsDirty && bindingMain === main && bindingCore === core) return true;
+    // A composer may mount lazily below the unobserved conversation subtree.
+    // Recheck its small semantic signature on existing surface/status checks;
+    // never observe chat text or invalidate styles for ordinary token streaming.
+    const composers = main.querySelectorAll('[data-composer-surface-variant]');
+    let composer = '';
+    if (composers.length > 16) { layoutReason = 'composer-ambiguous'; return false; }
+    for (const node of composers) {
+      if (!['default', 'opaque', 'secondary'].includes(node.getAttribute('data-composer-surface-variant')) || node.closest('[data-app-shell-active-page="false"]')) continue;
+      const actual = componentToken(node, 'ComposerLayoutRoot');
+      if (!actual || (composer && composer !== actual.token)) { layoutReason = 'composer-ambiguous'; return false; }
+      composer = actual.token;
+    }
+    if (!bindingsDirty && bindingMain === main && bindingCore === core && bindingComposer === composer) { layoutReason = 'ready'; return true; }
+    layoutReason = 'shell-shape';
     const bindings = { MainContentSurface: mainToken.token, WorkspaceContent: workspaceToken.token };
+    if (composer) bindings.ComposerLayoutRoot = composer;
     const nodes = new Set(), spines = new Set(), containers = new Set([workspace]);
     let ancestor = main, depth = 0;
     while (ancestor && ancestor !== root && depth++ < 24) { spines.add(ancestor); ancestor = ancestor.parentElement; }
@@ -403,14 +419,6 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
         bindings[name] = actual.token;
       }
     }
-    const composers = main.querySelectorAll('[data-composer-surface-variant]');
-    if (composers.length > 16) return false;
-    for (const node of composers) {
-      if (!['default', 'opaque', 'secondary'].includes(node.getAttribute('data-composer-surface-variant')) || node.closest('[data-app-shell-active-page="false"]')) continue;
-      const actual = componentToken(node, 'ComposerLayoutRoot');
-      if (!actual || (bindings.ComposerLayoutRoot && bindings.ComposerLayoutRoot !== actual.token)) return false;
-      bindings.ComposerLayoutRoot = actual.token;
-    }
     const signature = JSON.stringify(bindings);
     if (signature !== styleBinding) {
       // Change exact selectors only. All paint values and accessibility rules
@@ -418,21 +426,26 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
       style.textContent = styleTemplate.replace(/_([A-Za-z]+)_(?:yl8z4|boifs)_2\b/g, (token, name) => bindings[name] || token);
       styleBinding = signature;
     }
-    bindingMain = main; bindingCore = core; bindingsDirty = false;
+    bindingMain = main; bindingCore = core; bindingComposer = composer; bindingsDirty = false;
     boundShellNodes = [...spines, ...containers].filter(node => node !== root && !node.closest('[data-app-shell-active-page="false"]'));
+    layoutReason = 'ready';
     return true;
   }
   function supportedSurface() {
-    if (document.documentElement.getAttribute('data-codex-window-type') !== 'electron') return null;
+    // The host authenticates the executable and application URL. Here require
+    // the audited document shape; a framework's label is not a layout contract.
+    if (!root.isConnected || document.getElementById('root') !== root) { layoutReason = 'root-missing'; return null; }
     const mains = document.querySelectorAll(mainSelector);
+    layoutReason = 'main-count';
     if (mains.length > 128) return null;
     let selected = null, selectedChild = null, selectedMain = null, selectedWorkspace = null;
     for (const main of mains) {
       // Cached inactive conversations are genuine but are not the destination.
       if (main.closest('[data-app-shell-active-page="false"]')) continue;
-      if (selected) return null;
+      if (selected) { layoutReason = 'main-count'; return null; }
       const actualMain = componentToken(main, 'MainContentSurface');
-      if (!actualMain) return null;
+      if (!actualMain) { layoutReason = 'main-token'; return null; }
+      layoutReason = 'workspace-shape';
       let actualWorkspace = null;
       for (const child of main.children) {
         if (!String(child.className || '').split(/\s+/).some(token => token.startsWith('_WorkspaceContent_'))) continue;
@@ -571,7 +584,7 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
     const wallpaperApplied = markerApplied && style.isConnected && document.getElementById(styleId) === style &&
       document.documentElement.getAttribute(marker) === 'v1';
     return { ...playbackQuality(), videoWidth: video.videoWidth, videoHeight: video.videoHeight,
-      attached, playing: playing && !video.paused && !documentHidden, disposed, code, layoutSupported, mediaReady,
+      attached, playing: playing && !video.paused && !documentHidden, disposed, code, layoutSupported, layoutReason, mediaReady,
       wallpaperApplied, firstFrameConfirmed, prepared: mediaReady, revealed, manuallyPaused,
       probeOnly, documentHidden, stageVisible: stageVisible(), mediaTimeMs, betweenAppearances, dormant, memoryPressure,
       protocolVersion: 2, documentGeneration, mediaGeneration: generation, rendererClockMs: Math.floor(performance.now()), actualPhase: disposed || retired ? 'retired' : recoveryNeeded ? 'faulted' : dormant ? 'hibernating' : layoutSuspended ? 'paused' : code === 'resuming' ? 'resuming' : betweenAppearances ? 'gap' : manuallyPaused ? 'paused' : !mediaReady ? 'preparing' : !revealed ? 'prepared' : 'visible',
@@ -818,7 +831,16 @@ html[data-codex-dragon-background="v1"][data-codex-window-type="electron"] #root
     return new Promise(resolve => {
       settlePending = resolve;
       try {
-        mediaFile = file; objectUrl = URL.createObjectURL(file); attached = true; layoutSuspended = false; watchSurface();
+        mediaFile = file; attached = true; layoutSuspended = false; watchSurface();
+        // Keep the validated File handles, not an allocated decoder, while the
+        // host reports critical commit pressure. The existing lease/reveal and
+        // wake paths resume this same attachment after pressure has cleared.
+        if (memoryPressure) {
+          hibernate();
+          const settle = settlePending; settlePending = null;
+          settle({ ok: true, code }); notify(); return;
+        }
+        objectUrl = URL.createObjectURL(file);
         loaded = prime;
         video.addEventListener('loadeddata', loaded);
         armFailureTimer('first-frame-timeout');

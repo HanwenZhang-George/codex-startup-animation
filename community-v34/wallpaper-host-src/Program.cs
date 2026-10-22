@@ -85,6 +85,7 @@ internal static class PreparationDiagnostics {
     }
     static readonly string[] SnapshotBooleans={"attached","mediaReady","prepared","disposed","playing","wallpaperApplied","revealed","layoutSupported","firstFrameConfirmed","documentHidden","stageVisible","recoveryNeeded","leaseNeedsRenew","layoutSuspended","memoryPressure","manuallyPaused","videoPaused","videoSeeking","playStarted","frameCallbackPending","preparationTimerPending","frozen"};
     static readonly string[] SnapshotCodes={"idle","loading","prepared","playing","reveal-pending","ready-hidden","resuming","paused","hibernating","disposed","unsupported-layout","unverified","media-error","play-rejected","first-frame-timeout","reveal-timeout","resume-timeout","playback-stalled","invalid-file","file-too-large","retired","recovery-budget-exhausted"};
+    static readonly string[] LayoutReasons={"not-checked","root-missing","main-count","main-token","workspace-shape","shell-shape","composer-ambiguous","ready"};
     static object SnapshotValue(Dictionary<string,object> status,string key){object value;return status!=null&&status.TryGetValue(key,out value)?value:null;}
     static string SnapshotBoolean(object value){return value is bool?((bool)value?"1":"0"):"-1";}
     static string SnapshotNumber(object value,long maximum){
@@ -110,6 +111,7 @@ internal static class PreparationDiagnostics {
         object generation=SnapshotValue(status,"documentGeneration");
         fields.Append(" generationMatches=").Append(generation is string&&expectedGeneration!=null?((string)generation==expectedGeneration?"1":"0"):"-1");
         fields.Append(" rendererCode=").Append(SnapshotEnum(SnapshotValue(status,"code"),SnapshotCodes));
+        fields.Append(" layoutReason=").Append(SnapshotEnum(SnapshotValue(status,"layoutReason"),LayoutReasons));
         fields.Append(" actualPhase=").Append(SnapshotEnum(SnapshotValue(status,"actualPhase"),new[]{"retired","faulted","hibernating","paused","resuming","gap","preparing","prepared","visible"}));
         fields.Append(" health=").Append(SnapshotEnum(SnapshotValue(status,"health"),new[]{"faulted","stale","fresh"}));
         return new Snapshot(elapsedMilliseconds,fields.ToString());
@@ -194,6 +196,7 @@ internal static class PreparationDiagnostics {
         if(sourcePhase!=2&&sourcePhase!=6&&sourcePhase!=10)throw new ArgumentOutOfRangeException();
         var fields=new StringBuilder(FormatEvent(38,elapsed,0,null).TrimEnd('\r','\n'));
         fields.Append(" sourcePhase=").Append(sourcePhase.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        fields.Append(" layoutReason=").Append(SnapshotEnum(SnapshotValue(status,"layoutReason"),LayoutReasons));
         foreach(string key in new[]{"rootReady","bodyReady","layoutSupported","documentHidden","attached","mediaReady","prepared","disposed","firstFrameConfirmed","layoutWindowElectron"})fields.Append(' ').Append(key).Append('=').Append(SnapshotBoolean(SnapshotValue(status,key)));
         foreach(string key in new[]{"layoutMainCount","layoutActiveMainCount"})fields.Append(' ').Append(key).Append('=').Append(SnapshotNumber(SnapshotValue(status,key),129));
         object actual=SnapshotValue(status,"documentGeneration");fields.Append(" generationMatches=").Append(actual is string&&generation!=null?((string)actual==generation?"1":"0"):"-1");
@@ -226,6 +229,16 @@ internal static class PreparationDiagnostics {
     }
     internal static void RecordRuntimeRequest(int kind,long elapsed,long requestElapsed,int budget,HostFailure error){
         try{Enqueue(FormatRuntimeRequest(kind,elapsed,requestElapsed,budget,error));}catch{}
+    }
+    internal static void RecordMemoryPressure(string pressureState,long elapsed,long availableCommitBytes,long totalCommitBytes){
+        try{
+            if((pressureState!="suspended"&&pressureState!="resume-requested")||elapsed<0||elapsed>31536000000L)return;
+            // This is the caller's pressure sample and command acknowledgement,
+            // not a new measurement or confirmation that playback has resumed.
+            Enqueue(FormatEvent(43,elapsed,0,null).TrimEnd('\r','\n')+" pressureState="+pressureState+
+                " availableCommitBytes="+SnapshotNumber(availableCommitBytes,281474976710656L)+
+                " totalCommitBytes="+SnapshotNumber(totalCommitBytes,281474976710656L)+Environment.NewLine);
+        }catch{}
     }
     internal static string FormatLine(int phase,long elapsedMilliseconds,int code){
         if(phase<0||phase>15||elapsedMilliseconds<0||elapsedMilliseconds>31536000000L||code<0||code>65535)throw new ArgumentOutOfRangeException();
@@ -344,10 +357,11 @@ internal static class Program {
     static string Discovery {get{return Path.Combine(directory,"wallpaper-host-session.json");}}
     internal static bool Existing(string exe,out int pid,out long created){
         pid=0;created=0;bool unknown=false;
+        int ownSession;using(var current=Process.GetCurrentProcess()){ownSession=current.SessionId;}
         foreach(var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe))){using(process){try{
-            if(process.HasExited)continue;
+            if(process.HasExited||process.SessionId!=ownSession)continue;
             if(String.Equals(Path.GetFullPath(process.MainModule.FileName),exe,StringComparison.OrdinalIgnoreCase)){
-                // Any official descendant blocks a second launch. Prefer a
+                // Any official descendant in this session blocks a second launch. Prefer a
                 // main-window PID for the status hint, but never require HWND.
                 if(pid==0||process.MainWindowHandle!=IntPtr.Zero){pid=process.Id;created=Native.Creation(process.Handle);}
             }

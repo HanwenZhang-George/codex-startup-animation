@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([Parameter(Mandatory=$true)][string]$ReleaseRoot,[switch]$CheckOfficial)
 . (Join-Path $PSScriptRoot '..\packaging\PackageTools.ps1')
 Assert-SupportedPlatform

@@ -377,8 +377,12 @@ namespace DragonLauncher
                     try
                     {
                         if(replayExisting){
-                            var existing=ExistingReplayTarget.Find(config,root);
-                            if(existing==null){RecordStartupStage("replay-target-unavailable-no-activation",startupTimer);return 0;}
+                            var existing=ExistingReplayTarget.Find(config,root,message=>LauncherDiagnostics.Write("handoff-latest.log",message));
+                            if(existing==null){
+                                RecordStartupStage("replay-target-unavailable-no-activation",startupTimer);
+                                System.Windows.MessageBox.Show("没有识别到可重播启动动画的 Codex 窗口。\n\n请确认 Codex 窗口已打开。当前 Codex 和壁纸没有被关闭或重新启动。\n\n请运行本包 Diagnostics 文件夹里的 One-Click-Diagnostics.cmd，并发送生成的报告。", "Codex 启动动画", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+                                return 76;
+                            }
                             config=config.WithExistingReplay(existing);
                             RecordStartupStage("replay-existing-window-pinned",startupTimer);
                         }

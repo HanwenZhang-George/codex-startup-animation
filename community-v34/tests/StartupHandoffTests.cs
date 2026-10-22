@@ -35,7 +35,7 @@ public static class StartupHandoffTests {
   internal void Value(Request request,object value,int delay=0,string wrongSession=null){Reply(request,Json.Obj("result",Json.Obj("type","object","value",value)),delay,wrongSession);}
   internal Dictionary<string,object> Status(bool media){return Json.Obj(
    "attached",media,"mediaReady",media,"prepared",media,"disposed",false,"playing",Committed,"wallpaperApplied",Committed,"revealed",Committed,"layoutSupported",true,
-   "manuallyPaused",false,"probeOnly",false,"firstFrameConfirmed",false,"documentHidden",false,"stageVisible",false,"code",Committed?"playing":media?"prepared":"preparing","mediaTimeMs",0,
+   "manuallyPaused",false,"probeOnly",false,"firstFrameConfirmed",false,"documentHidden",false,"stageVisible",false,"memoryPressure",false,"code",Committed?"playing":media?"prepared":"preparing","mediaTimeMs",0,
    "documentGeneration",Owner.State.DocumentGeneration,"protocolVersion",2,"leaseNeedsRenew",false,"mediaGeneration",media?1:0,"actualPhase",Committed?"visible":media?"prepared":"preparing","health","fresh",
    "prepareOperationId",AcceptedOperation,"commitAccepted",Committed,"recoveryNeeded",false,"recoveryStable",false,"recoveryReason","","rendererClockMs",1000,
    "layoutWindowElectron",true,"layoutMainCount",1,"layoutActiveMainCount",1);}

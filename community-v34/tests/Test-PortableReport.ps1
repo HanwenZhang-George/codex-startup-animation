@@ -117,6 +117,23 @@ $r=Convert-FixLogEvent ($stamp+'phase=12 elapsedMs=27000 code=137 operationKind=
 Check ($null -eq $r.PSObject.Properties['operationKind'] -and $null -eq $r.PSObject.Properties['requestElapsedMs']) 'new detail fields accepted only for exact phase41'
 $script:passed++;Write-Output 'PASS phase41 bounded failure-only request evidence and unknown fields'
 
+foreach($pressureState in @('suspended','resume-requested')){
+    $line=$stamp+'phase=43 elapsedMs=28000 code=0 pressureState='+$pressureState+' availableCommitBytes=536870911 totalCommitBytes=34359738368'
+    $r=Convert-FixLogEvent $line 'output/wallpaper-readiness.log'
+    Check ($r.pressureState -ceq $pressureState -and $r.availableCommitBytes -eq 536870911 -and $r.totalCommitBytes -eq 34359738368) 'recoverable host commit-pressure event retains fixed state and optional counters'
+}
+$r=Convert-FixLogEvent ($stamp+'phase=43 elapsedMs=28000 code=0 pressureState=suspended availableCommitBytes=281474976710656 totalCommitBytes=281474976710656') 'output/wallpaper-readiness.log'
+Check ($r.availableCommitBytes -eq 281474976710656 -and $r.totalCommitBytes -eq 281474976710656) 'declared 2^48 counter maximum survives export without truncation'
+foreach($suffix in @('', ' pressureState=PRIVATE availableCommitBytes=PRIVATE totalCommitBytes=PRIVATE',' pressureState=suspended pressureState=resume-requested availableCommitBytes=1 availableCommitBytes=2',' pressureState=playing availableCommitBytes=-2 totalCommitBytes=281474976710657')){
+    $r=Convert-FixLogEvent ($stamp+'phase=43 elapsedMs=28000 code=0'+$suffix) 'output/wallpaper-readiness.log'
+    Check ($r.pressureState -ceq 'unknown' -and $r.availableCommitBytes -eq -1 -and $r.totalCommitBytes -eq -1 -and ($r|ConvertTo-Json -Compress) -cnotmatch 'PRIVATE') 'ambiguous host pressure state/counters remain unknown'
+}
+foreach($header in @('phase=42 elapsedMs=28000 code=0','phase=43 elapsedMs=28000 code=174')){
+    $r=Convert-FixLogEvent ($stamp+$header+' pressureState=suspended availableCommitBytes=123') 'output/wallpaper-readiness.log'
+    Check ($null -eq $r.PSObject.Properties['pressureState'] -and $null -eq $r.PSObject.Properties['availableCommitBytes']) 'host pressure details accepted only at exact nonfailure phase43'
+}
+$script:passed++;Write-Output 'PASS recoverable host commit-pressure allowlist and unknown boundaries'
+
 $gates=$stamp+'Living preparation gates; elapsedMs=25000; nativeStable=True; focusSettled=False; targetForeground=False; ownOverlayActive=True; foreground=film; filmWpfActive=True; filmNativeForeground=True; pulseWpfActive=False; pulseNativeForeground=False; focusAttempts=2; wallpaperPrepared=True; pulseReady=True; finaleReady=True; mediaCode=1; refreshCode=1'
 $finale=$stamp+'Living finale committed; nativeStable=True; focusSettled=True; actualForeground=False; wallpaperReady=True; finalePrerolled=True; pulseReady=True; speed=1'
 $complete=$stamp+'Handoff complete; success=True; pulseFrames=46; wallpaperCommitConfirmed=True; wallpaperPlaybackRequiresObserver=True; replayExisting=False'
@@ -131,7 +148,26 @@ $g=Convert-FixLogEvent $bridge 'output/handoff-latest.log';Check ($g.operation -
 $script:passed++;Write-Output 'PASS fixed handoff/gate/finale/pulse/bridge categories'
 
 $resource=$stamp+'Startup resource sample; elapsedMs=25000; intervalMs=2000; cpuPermille=750; privateBytes=123456789; availablePhysicalBytes=8589934592; totalPhysicalBytes=17179869184; availableCommitBytes=4294967296; totalCommitBytes=34359738368; logicalProcessors=16; lowMemory=0'
+foreach($resourceReason in @('system-memory-pressure','system-commit-pressure','wallpaper-commit-pressure','startup-private-memory-limit','startup-sustained-cpu-limit','startup-resource-monitor-unavailable')){
+    $g=Convert-FixLogEvent ($stamp+'Startup resource protection: '+$resourceReason) 'output/handoff-latest.log'
+    Check ($null -ne $g -and $g.category -ceq 'startup-resource-protection' -and $g.resourceReason -ceq $resourceReason) 'exact resource trip reason retained'
+}
+$g=Convert-FixLogEvent ($stamp+'Startup resource protection: system-memory-pressure PRIVATE C:\Users\SECRET') 'output/handoff-latest.log'
+Check ($g.resourceReason -ceq 'unknown' -and ($g|ConvertTo-Json -Compress) -notmatch 'PRIVATE|SECRET|C:\\Users') 'unknown resource reason never exported'
+$g=Convert-FixLogEvent ($stamp+'Startup animation released for resource protection; wallpaper preparation continues; no success finale') 'output/handoff-latest.log'
+Check ($g.category -ceq 'startup-resource-animation-released') 'exact resource compensation event retained'
+Check ($null -eq (Convert-FixLogEvent ($stamp+'Startup animation released for resource protection; wallpaper preparation continues; no success finale PRIVATE') 'output/handoff-latest.log')) 'resource compensation text suffix not accepted'
+$script:passed++;Write-Output 'PASS exact bounded startup resource reasons'
 $g=Convert-FixLogEvent $resource 'output/handoff-latest.log';Check ($g.category -ceq 'startup-resource-sample' -and $g.cpuPermille -eq 750 -and $g.availablePhysicalBytes -eq 8589934592 -and $g.logicalProcessors -eq 16 -and $g.lowMemory -eq 0) 'startup numeric resource sample'
+Check ($g.notificationLow -eq -1) 'legacy startup sample preserves absent physical notification as unknown'
+foreach($notification in @(-1,0,1)){
+    $g=Convert-FixLogEvent ($resource+'; notificationLow='+$notification) 'output/handoff-latest.log'
+    Check ($g.notificationLow -eq $notification -and $g.lowMemory -eq 0) 'physical notification remains independent of protection input'
+}
+foreach($notification in @('PRIVATE','2','-2','true','1.5','1; notificationLow=0')){
+    $g=Convert-FixLogEvent ($resource+'; notificationLow='+$notification) 'output/handoff-latest.log'
+    Check ($g.notificationLow -eq -1 -and ($g|ConvertTo-Json -Compress) -cnotmatch 'PRIVATE') 'notification malformed or duplicated remains unknown'
+}
 $badResource=$stamp+'Startup resource sample; elapsedMs=-2; intervalMs=PRIVATE; cpuPermille=1001; privateBytes=281474976710657; availablePhysicalBytes=1 availablePhysicalBytes=PRIVATE; totalPhysicalBytes=PRIVATE; availableCommitBytes=-2; totalCommitBytes=1.5; logicalProcessors=4097; lowMemory=True'
 $g=Convert-FixLogEvent $badResource 'output/handoff-latest.log'
 foreach($key in @('elapsedMs','intervalMs','cpuPermille','privateBytes','availablePhysicalBytes','totalPhysicalBytes','availableCommitBytes','totalCommitBytes','logicalProcessors','lowMemory')){Check ($g.$key -eq -1) ('invalid resource value remains unknown '+$key)}
@@ -154,6 +190,15 @@ $g=Convert-FixLogEvent ($stamp+'Compact placement waiting; phase=3; elapsedMs=31
 foreach($key in @('phase','elapsedMs','exists','verified','visible','minimized','cloaked','mainCandidate','sameProbe','probeAgeMs','probeResponsive','probePending','postReadyLossMs')){Check ($g.$key -eq -1) ('native absent/out-of-bound unknown '+$key)}
 Check ($null -eq (Convert-FixLogEvent ($stamp+'PRIVATE Native readiness waiting after placement; phase=1') 'output/handoff-latest.log')) 'unrelated native wait prefix rejected'
 $script:passed++;Write-Output 'PASS native wait diagnostics preserve exact structural evidence without free text'
+
+foreach($command in @('reveal','pause','disable','status','refresh','prepare','commit')){
+    $g=Convert-FixLogEvent ($stamp+'Wallpaper bridge command failed: '+$command) 'output/handoff-latest.log'
+    Check ($null -ne $g -and $g.category -ceq 'wallpaper-command-failed' -and $g.command -ceq $command) 'fixed queued-command failure retained'
+}
+Check ($null -eq (Convert-FixLogEvent ($stamp+'Wallpaper bridge command failed: reveal PRIVATE') 'output/handoff-latest.log')) 'command failure arbitrary suffix not exported'
+$g=Convert-FixLogEvent ($stamp+'Native recovery still unconfirmed after bounded retry') 'output/handoff-latest.log'
+Check ($null -ne $g -and $g.category -ceq 'native-recovery-unconfirmed') 'native recovery remains unconfirmed'
+$script:passed++;Write-Output 'PASS bounded recovery diagnostics distinguish request failure from confirmation'
 
 $failureCases=@(
     @('客户端窗口准备失败 已保留 Codex 请查看启动日志','client-window-preparation-failed'),
@@ -197,7 +242,9 @@ $zip=[IO.Compression.ZipFile]::OpenRead($extendedZip.FullName)
 try{$reader=[IO.StreamReader]::new($zip.Entries[0].Open());try{$safeText=$reader.ReadToEnd()}finally{$reader.Dispose()}}finally{$zip.Dispose()}
 $extended=$safeText|ConvertFrom-Json;$hostEvents=@($extended.logs|Where-Object {$_.log -ceq 'output/wallpaper-readiness.log'})[0].records;$handoffEvents=@($extended.logs|Where-Object {$_.log -ceq 'output/handoff-latest.log'})[0].records
 Check ($hostEvents.Count -eq 6 -and $handoffEvents.Count -eq 11 -and $hostEvents[5].operationKind -eq 2 -and $hostEvents[5].requestElapsedMs -eq 750) 'expanded source records survive ZIP pipeline'
-Check ($safeText -notmatch '\bPRIVATE\b|API_KEY|account@|private\.example|"pid"|"trace"|"hostPid"|C:\\Users|exceptionType|hresult') 'new reports do not leak raw diagnostic text or identifiers'
+Check ($safeText -notmatch '\bPRIVATE\b|API_KEY|account@|private\.example|"pid"|"trace"|"hostPid"|C:\\Users') 'new reports do not leak raw diagnostic text or identifiers'
+$bridgeEvents=@($handoffEvents|Where-Object category -ceq 'bridge-diagnostic')
+Check ($bridgeEvents.Count -eq 1 -and $bridgeEvents[0].exceptionType -ceq 'None' -and $bridgeEvents[0].hresult -eq 0 -and $bridgeEvents[0].nativeErrorCode -eq -1) 'fixed exception identifiers and numeric codes only; absent native error stays unknown'
 $script:passed++;Write-Output 'PASS extended noarg PS5.1 ZIP end-to-end privacy'
 
 $f=New-SmallManifest 'missing-declared-file';$r=Get-PortableDiagnosticReport $f.root;Check ($r.declaredFileCount -eq 1 -and $r.verifiedFileCountAtPreparation -eq -1) 'missing component still permits honest diagnostic report';$script:passed++;Write-Output 'PASS declared file count does not assert file integrity'

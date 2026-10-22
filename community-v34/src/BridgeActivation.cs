@@ -13,6 +13,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
+using Microsoft.Win32.SafeHandles;
 
 namespace DragonLauncher
 {
@@ -50,6 +51,11 @@ namespace DragonLauncher
         [DataMember(Name="actualPhase", IsRequired=false)] public string ActualPhase { get; set; }
         [DataMember(Name="health", IsRequired=false)] public string Health { get; set; }
         [DataMember(Name="sequence", IsRequired=false)] public long Sequence { get; set; }
+        [DataMember(Name="memoryPressure", IsRequired=false, EmitDefaultValue=false)] public bool? MemoryPressure { get; set; }
+        [DataMember(Name="desiredMode", IsRequired=false, EmitDefaultValue=false)] public string DesiredMode { get; set; }
+        // Local conservative request anchor is never supplied by the pipe peer
+        // or serialized. It includes response transit in observation freshness.
+        internal long ObservationRequestedAt;
     }
 
     internal enum WallpaperReadinessState
@@ -168,11 +174,15 @@ namespace DragonLauncher
         public void Dispose() { BridgeSession held=Interlocked.Exchange(ref Session,null); if(held!=null)held.Dispose(); }
     }
 
-    // The original Process handle is retained for this entire session. Disposing
-    // it only releases our wrapper; neither the host nor Codex is ever killed.
+    // Retain one authenticated process generation for the complete session.
+    // Cold launch keeps Process.Start's existing handle. Discovery transfers
+    // its already-verified minimum-read handle instead of requesting ALL_ACCESS.
     internal sealed class BridgeSession : IDisposable
     {
         private readonly Process host;
+        private readonly SafeProcessHandle queriedHost;
+        private readonly IntPtr retainedHandle;
+        private readonly int hostPid;
         private readonly string pipeName;
         private readonly long hostCreated;
         private readonly object lifetimeGate=new object(), ioGate=new object();
@@ -187,17 +197,39 @@ namespace DragonLauncher
         // Only a signaled retained process handle proves this exact host ended.
         // Pipe timeouts, access errors and a reused PID are not exit evidence.
         internal bool HostExited { get { lock(lifetimeGate) {
-            return !disposed && BridgeNative.HasExited(host.Handle);
+            return !disposed && BridgeNative.HasExited(retainedHandle);
         } } }
 
         internal BridgeSession(Process process,string session,Action<string> log)
+            :this(process,null,session,log) {}
+        internal BridgeSession(Process process,SafeProcessHandle queryHandle,string session,Action<string> log)
         {
-            host=process;this.log=log;
-            // Accessing Handle makes Process retain the specific instance.
-            IntPtr retained=host.Handle;
-            if(!BridgeNative.IsAlive(retained) || !BridgeNative.CreationTime(retained,out hostCreated))
+            host=process;this.log=log;hostPid=process.Id;
+            // The query handle is transferred only after construction succeeds;
+            // the caller disposes it on failure. Never reopen its PID here.
+            queriedHost=queryHandle;
+            retainedHandle=queryHandle==null?process.Handle:queryHandle.DangerousGetHandle();
+            if(!BridgeNative.IsAlive(retainedHandle) || !BridgeNative.CreationTime(retainedHandle,out hostCreated))
                 throw new InvalidOperationException("bridge-instance-unavailable");
             pipeName=BridgeActivation.PipeName(session);
+        }
+        internal bool MatchesHost(int pid,long created)
+        {lock(lifetimeGate){long actual;return !disposed && pid==hostPid && created==hostCreated &&
+            BridgeNative.IsAlive(retainedHandle) && BridgeNative.CreationTime(retainedHandle,out actual) && actual==hostCreated;}}
+        internal bool IsPreparationPressureSuspended(BridgeStatus status)
+        {
+            if(status==null||!Object.ReferenceEquals(status,LastStatus)||status.Version!=1||status.Disposition!=2||
+                status.ProtocolVersion!=2||status.DiagnosticsVersion!=1||status.Health!="fresh"||status.DesiredMode!="enabled"||
+                status.Disabled||status.Ready||status.Prepared||status.Attached!=true||status.MemoryPressure!=true||
+                status.Playing!=false||status.FirstFrameConfirmed!=false||status.ActualPhase!="hibernating"||
+                status.MediaGeneration<=0||status.Sequence<=0||!StartupPreparation.ValidId(status.DocumentGeneration)||
+                status.ObservationAgeMs<0||status.ObservationAgeMs>1500||status.ObservationRequestedAt<=0)return false;
+            // A cached fresh-looking response ages while the dispatcher is busy.
+            // Include the host's age and our full request duration, conservatively
+            // covering response transit as well as local dispatcher delay.
+            long ticks=Stopwatch.GetTimestamp()-status.ObservationRequestedAt;
+            if(ticks<0||status.ObservationAgeMs+ticks*1000.0/Stopwatch.Frequency>1500)return false;
+            return MatchesHost(status.HostPid,status.HostCreated);
         }
         private static int Remaining(Stopwatch watch,int total)
         {
@@ -217,13 +249,13 @@ namespace DragonLauncher
         {
             if(!ValidCommand(command))
                 throw new InvalidOperationException("bridge-command-rejected");
-            var watch=Stopwatch.StartNew();
-            if(!BridgeNative.IsAlive(host.Handle))throw new InvalidOperationException("bridge-instance-ended");
+            long requestedAt=Stopwatch.GetTimestamp();var watch=Stopwatch.StartNew();
+            if(!BridgeNative.IsAlive(retainedHandle))throw new InvalidOperationException("bridge-instance-ended");
             using(var pipe=new NamedPipeClientStream(".",pipeName,PipeDirection.InOut,PipeOptions.Asynchronous,TokenImpersonationLevel.Identification)) {
                 pipe.Connect(Remaining(watch,timeout));
                 uint server;
                 if(!BridgeNative.GetNamedPipeServerProcessId(pipe.SafePipeHandle.DangerousGetHandle(),out server) ||
-                    server!=(uint)host.Id || !BridgeNative.IsAlive(host.Handle))
+                    server!=(uint)hostPid || !BridgeNative.IsAlive(retainedHandle))
                     throw new InvalidOperationException("bridge-server-identity-rejected");
                 byte[] request=Encoding.UTF8.GetBytes(command+"\n");
                 Await(pipe.WriteAsync(request,0,request.Length),watch,timeout);
@@ -236,7 +268,7 @@ namespace DragonLauncher
                     if(end<0)continue;
                     if(end!=used-1)throw new InvalidDataException("bridge-response-trailing-data");
                     BridgeStatus status=BridgeActivation.Decode<BridgeStatus>(buffer,end);
-                    if(status.Version!=1 || status.HostPid!=host.Id || status.HostCreated!=hostCreated ||
+                    if(status.Version!=1 || status.HostPid!=hostPid || status.HostCreated!=hostCreated ||
                         status.Disposition<0 || status.Disposition>3 || status.CodexPid<0 || status.CodexCreated<0 ||
                         status.MediaCode<0 || status.MediaCode>65535 ||
                         status.RefreshCode<0 || status.RefreshCode>4 ||
@@ -247,7 +279,7 @@ namespace DragonLauncher
                     if(LastStatus!=null && LastStatus.Disposition==2 &&
                         (status.CodexPid!=LastStatus.CodexPid || status.CodexCreated!=LastStatus.CodexCreated))
                         throw new InvalidDataException("bridge-client-generation-changed");
-                    LastStatus=status;return status;
+                    status.ObservationRequestedAt=requestedAt;LastStatus=status;return status;
                 }
             }
         }
@@ -333,11 +365,14 @@ namespace DragonLauncher
                 }
                 bool entered=false;
                 try {
-                    int budget=Math.Min(1500,Remaining(deadline,3000));var watch=Stopwatch.StartNew();
-                    if(!Monitor.TryEnter(ioGate,Remaining(watch,budget)))throw new TimeoutException("bridge-command-lock-timeout");
+                    // A valid in-flight preparation may own IO for 1800 ms.
+                    // Do not consume the reveal's shorter exchange allowance
+                    // while waiting for it; every wait/exchange still shares
+                    // this drain's unchanged three-second total deadline.
+                    if(!Monitor.TryEnter(ioGate,Remaining(deadline,3000)))throw new TimeoutException("bridge-command-lock-timeout");
                     entered=true;
                     bool rejected;lock(lifetimeGate){rejected=disableRequested&&ChangesDecoration(command);}
-                    if(!rejected)ExchangeCore(command,Remaining(watch,budget));
+                    if(!rejected)ExchangeCore(command,Math.Min(1500,Remaining(deadline,3000)));
                 }
                 catch {try{if(log!=null)log("Wallpaper bridge command failed: "+SafeCommand(command));}catch{}}
                 finally {if(entered)Monitor.Exit(ioGate);lock(lifetimeGate) {pendingCommands--;ReleaseIfIdle();} }
@@ -348,7 +383,7 @@ namespace DragonLauncher
           if(command!=null&&command.StartsWith("commit ",StringComparison.Ordinal))return "commit";
           return command=="reveal" || command=="pause" || command=="disable" || command=="status" || command=="refresh" ? command : "invalid"; }
         private void ReleaseIfIdle()
-        {if(disposalRequested && !disposed && pendingCommands==0 && synchronousCommands==0){disposed=true;host.Dispose();}}
+        {if(disposalRequested && !disposed && pendingCommands==0 && synchronousCommands==0){disposed=true;if(queriedHost!=null)queriedHost.Dispose();host.Dispose();}}
         public void Dispose(){lock(lifetimeGate){disposalRequested=true;ReleaseIfIdle();}}
     }
 
@@ -386,11 +421,25 @@ namespace DragonLauncher
                 log("bridge-diagnostic trace="+Trace+" pid="+pid.ToString(CultureInfo.InvariantCulture)+" operation="+operation+
                     " phase="+phase.ToString(CultureInfo.InvariantCulture)+" elapsedMs="+Math.Max(0,elapsed).ToString(CultureInfo.InvariantCulture)+
                     " reason="+reason.ToString(CultureInfo.InvariantCulture)+" outcome="+safe+" exceptionType="+ExceptionType(error)+
+                    " nativeErrorCode="+NativeErrorCode(error).ToString(CultureInfo.InvariantCulture)+
                     " hresult="+(error==null?0:error.HResult).ToString(CultureInfo.InvariantCulture)+
                     " hostPid="+(status==null?0:status.HostPid).ToString(CultureInfo.InvariantCulture)+
                     " disposition="+(status==null?-1:status.Disposition).ToString(CultureInfo.InvariantCulture)+
                     " mediaCode="+(status==null?-1:status.MediaCode).ToString(CultureInfo.InvariantCulture));
             }catch{} // A broken diagnostic sink cannot alter activation.
+        }
+        internal static int NativeErrorCode(Exception error)
+        {var native=error as System.ComponentModel.Win32Exception;return native==null?0:native.NativeErrorCode;}
+        internal static void ReadOnly(Action<string> log,string operation,int phase,long elapsed,int reason,Exception error)
+        {
+            try{
+                if(log==null || (operation!="find"&&operation!="attest") || phase<0||phase>16||reason<0||reason>32)return;
+                log("replay-diagnostic operation="+operation+" phase="+phase.ToString(CultureInfo.InvariantCulture)+
+                    " elapsedMs="+Math.Max(0,elapsed).ToString(CultureInfo.InvariantCulture)+
+                    " reason="+reason.ToString(CultureInfo.InvariantCulture)+" exceptionType="+ExceptionType(error)+
+                    " nativeErrorCode="+NativeErrorCode(error).ToString(CultureInfo.InvariantCulture)+
+                    " hresult="+(error==null?0:error.HResult).ToString(CultureInfo.InvariantCulture));
+            }catch{} // Logging never changes identity or replay selection.
         }
     }
 
@@ -420,6 +469,13 @@ namespace DragonLauncher
                         bool flag=name=="layoutSupported" || name=="probeOnly" || name=="attached" || name=="playing" ||
                             name=="wallpaperApplied" || name=="firstFrameConfirmed" || name=="documentHidden" || name=="stageVisible";
                         bool number=name=="refreshCode" || name=="diagnosticsVersion" || name=="mediaTimeMs";
+                         if(name=="memoryPressure"||name=="desiredMode"){
+                             bool memory=name=="memoryPressure";
+                             if(!seen.Add(name)||reader.GetAttribute("type")!=(memory?"boolean":"string"))throw new InvalidDataException("bridge-pressure-field-rejected");
+                             string value=reader.ReadElementContentAsString();
+                             if(memory?value!="true"&&value!="false":value!="enabled"&&value!="user-paused"&&value!="disabled")throw new InvalidDataException("bridge-pressure-value-rejected");
+                             continue;
+                         }
                         if(flag || number){
                             if(!seen.Add(name) || reader.GetAttribute("type")!=(flag?"boolean":"number"))
                                 throw new InvalidDataException("bridge-diagnostic-field-rejected");
@@ -462,7 +518,7 @@ namespace DragonLauncher
         {return Supported(settings) ? Discover(AppDomain.CurrentDomain.BaseDirectory,expectedPid,log) : null;}
         internal static BridgeSession Discover(string root,uint expectedPid,Action<string> log,bool allowUnresolved=false)
         {
-            Process process=null;BridgeSession session=null;BridgeStatus observed=null;
+            Process process=null;SafeProcessHandle queryHandle=null;BridgeSession session=null;BridgeStatus observed=null;
             var clock=Stopwatch.StartNew();int phase=1,reason=0;Exception failure=null;
             try {
                 string file=Path.Combine(root,"wallpaper-host-session.json");var info=new FileInfo(file);
@@ -471,11 +527,12 @@ namespace DragonLauncher
                 phase=2;byte[] bytes=File.ReadAllBytes(file);var item=Decode<BridgeDiscovery>(bytes,bytes.Length);
                 PipeName(item.Session);
                 if(item.Version!=1 || item.HostPid<=0 || item.HostCreated<=0){reason=3;return null;}
-                phase=3;process=Process.GetProcessById(item.HostPid);IntPtr handle=process.Handle;long created;
+                phase=3;queryHandle=BridgeNative.OpenReadProcess((uint)item.HostPid);IntPtr handle=queryHandle.DangerousGetHandle();long created;
                 string expected=Path.GetFullPath(Path.Combine(root,"WallpaperHost.exe"));
                 if(!BridgeNative.IsAlive(handle) || !BridgeNative.CreationTime(handle,out created) || created!=item.HostCreated ||
                     !string.Equals(BridgeNative.ImagePath(handle),expected,StringComparison.OrdinalIgnoreCase)){reason=4;return null;}
-                session=new BridgeSession(process,item.Session,log);process=null;
+                process=Process.GetProcessById(item.HostPid);
+                session=new BridgeSession(process,queryHandle,item.Session,log);process=null;queryHandle=null;
                 phase=4;
                 try {observed=session.Status(700);}catch(Exception error){failure=error;if(!allowUnresolved)throw;reason=7;}
                 if(!allowUnresolved && (observed.Disposition!=2 || (expectedPid!=0 && observed.CodexPid!=(int)expectedPid))){reason=5;return null;}
@@ -483,7 +540,7 @@ namespace DragonLauncher
             }catch(Exception error){failure=error;reason=6;return null;}
             finally {
                 BridgeDiagnostics.Record(log,"discover",phase,clock.ElapsedMilliseconds,reason,null,failure,observed);
-                if(process!=null)process.Dispose();if(session!=null)session.Dispose();
+                if(queryHandle!=null)queryHandle.Dispose();if(process!=null)process.Dispose();if(session!=null)session.Dispose();
             }
         }
         internal static BridgeResult OpenOnce(Settings settings,Action<string> log)
@@ -602,43 +659,71 @@ namespace DragonLauncher
                 string.Equals(expectedExe,actualExe,StringComparison.OrdinalIgnoreCase);
         }
         private static bool IsLiveInstance(uint pid,long created,string executable)
+        {try{return IsLiveInstanceCore(pid,created,executable);}catch{return false;}}
+        private static bool IsLiveInstanceCore(uint pid,long created,string executable)
         {
             if(pid==0 || pid>int.MaxValue || created<=0)return false;
-            try {using(var process=Process.GetProcessById((int)pid))using(var own=Process.GetCurrentProcess())
+            using(var process=BridgeNative.OpenReadProcess(pid))
             {
-                long actualCreated;IntPtr handle=process.Handle;
-                return process.SessionId==own.SessionId && BridgeNative.IsAlive(handle) &&
+                long actualCreated;IntPtr handle=process.DangerousGetHandle();
+                return BridgeNative.SameSession(pid) && BridgeNative.IsAlive(handle) &&
                     BridgeNative.CreationTime(handle,out actualCreated) &&
-                    SameSnapshot(pid,created,executable,(uint)process.Id,actualCreated,BridgeNative.ImagePath(handle));
-            }}catch{return false;}
+                    SameSnapshot(pid,created,executable,pid,actualCreated,BridgeNative.ImagePath(handle));
+            }
         }
         // Read-only validation is also used by the isolated test executable.
         // It cannot mint a window-control capability without a bridge session.
         internal static bool ValidateOfficialProcess(string root,uint pid,long created)
         {try{return IsLiveInstance(pid,created,PinnedExecutable(root));}catch{return false;}}
-        internal static BridgeClientIdentity Attest(Settings settings,string root,BridgeSession session)
+        internal static BridgeClientIdentity Attest(Settings settings,string root,BridgeSession session,Action<string> log=null)
         {
+            var clock=Stopwatch.StartNew();int phase=1,reason=0;Exception failure=null;
             try
             {
                 if(settings==null || !settings.WallpaperEnabled || !string.IsNullOrWhiteSpace(settings.Exe) ||
-                    !string.Equals(settings.AppId,OfficialAppId,StringComparison.OrdinalIgnoreCase) || session==null)return null;
+                    !string.Equals(settings.AppId,OfficialAppId,StringComparison.OrdinalIgnoreCase) || session==null){reason=1;return null;}
+                phase=2;
                 BridgeStatus status=session.LastStatus;
-                if(status==null || status.Version!=1 || status.Disposition!=2 || status.CodexPid<=0 || status.CodexCreated<=0)return null;
+                if(status==null || status.Version!=1 || status.Disposition!=2 || status.CodexPid<=0 || status.CodexCreated<=0){reason=2;return null;}
                 // Session construction and pipe replies bind the retained host
                 // handle; its own identity must still be alive at attestation.
-                Process host=session.RetainedProcess;long hostCreated;
-                if(host.Id!=status.HostPid || !BridgeNative.IsAlive(host.Handle) ||
-                    !BridgeNative.CreationTime(host.Handle,out hostCreated) || hostCreated!=status.HostCreated)return null;
+                phase=3;if(!session.MatchesHost(status.HostPid,status.HostCreated)){reason=3;return null;}
+                phase=4;
                 string executable=PinnedExecutable(root);
-                if(!IsLiveInstance((uint)status.CodexPid,status.CodexCreated,executable))return null;
+                phase=5;if(!IsLiveInstanceCore((uint)status.CodexPid,status.CodexCreated,executable)){reason=4;return null;}
+                phase=6;
                 return new BridgeClientIdentity((uint)status.CodexPid,status.CodexCreated,executable);
             }
-            catch{return null;}
+            catch(Exception error){failure=error;reason=5;
+                // Translate only our own fixed validation exceptions to enums;
+                // never put their text or filesystem exception messages in logs.
+                if(error is InvalidDataException){switch(error.Message){
+                    case "official-file-unavailable":reason=6;break;
+                    case "official-file-link-rejected":reason=7;break;
+                    case "official-config-size-rejected":reason=8;break;
+                    case "official-pin-rejected":reason=9;break;
+                    case "official-package-not-registered":reason=10;break;
+                    case "official-executable-hash-rejected":reason=11;break;
+                }}return null;}
+            finally{BridgeDiagnostics.ReadOnly(log,"attest",phase,clock.ElapsedMilliseconds,reason,failure);}
         }
     }
 
     internal static class BridgeNative
     {
+        [DllImport("kernel32.dll",SetLastError=true)] private static extern SafeProcessHandle OpenProcess(uint access,bool inherit,uint pid);
+        [DllImport("kernel32.dll",SetLastError=true)] private static extern bool ProcessIdToSessionId(uint pid,out uint session);
+        internal static SafeProcessHandle OpenReadProcess(uint pid)
+        {
+            if(pid==0||pid>int.MaxValue)throw new ArgumentOutOfRangeException("pid");
+            // Liveness/creation/image queries plus a nonblocking exit wait. No
+            // mutation, VM access, debug privilege, or full process access.
+            SafeProcessHandle handle=OpenProcess(0x00101000,false,pid);
+            if(!handle.IsInvalid)return handle;
+            int error=Marshal.GetLastWin32Error();handle.Dispose();throw new System.ComponentModel.Win32Exception(error);
+        }
+        internal static bool SameSession(uint pid)
+        {uint target,own;using(var process=Process.GetCurrentProcess())return ProcessIdToSessionId(pid,out target)&&ProcessIdToSessionId((uint)process.Id,out own)&&target==own;}
         [DllImport("kernel32.dll",SetLastError=true)] internal static extern bool GetNamedPipeServerProcessId(IntPtr pipe,out uint pid);
         [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(IntPtr window,out uint pid);
         [DllImport("kernel32.dll",SetLastError=true)] private static extern bool GetExitCodeProcess(IntPtr process,out uint code);

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([switch]$RemoveGeneratedConfiguration)
 . (Join-Path $PSScriptRoot 'PackageTools.ps1')
 Assert-SupportedPlatform
@@ -22,6 +22,17 @@ foreach($name in @('Launch','Start-Codex-Dragon','WallpaperControls','WallpaperH
     }
 }
 $manifest=Read-PackageManifest $root
+# Restore BEFORE deleting Launch.exe. Any changed/missing link or invalid
+# ownership/backup stops removal, so an uncertain link cannot be stranded.
+$bindingStore=Assert-RegularPath (Join-Path $root '.official-shortcut')
+$bindingMarker=$state.PSObject.Properties['officialBindingRequested']
+if($null -ne $bindingMarker -or (Test-Path -LiteralPath $bindingStore)){
+    . (Join-SafePath $root 'OfficialShortcut.ps1')
+    if(Test-OfficialShortcutRecoveryNeeded $root $state){
+        $restoreResult=Restore-OfficialDesktopShortcutBinding $root ([Environment]::GetFolderPath('DesktopDirectory'))
+        Write-Output ('Original desktop shortcut recovery: '+$restoreResult+'. Exact original bytes remain in the separate recovery directory.')
+    }
+}
 $ownedDirectories=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach($record in $manifest.files) {
     $item=Join-SafePath $root $record.path

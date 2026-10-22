@@ -22,7 +22,7 @@ public static class StartupReadinessTests {
  }
  sealed class Peer:FileStream {
   internal Fixture Owner;internal Func<Request,bool> Intercept;internal readonly Dictionary<string,int> Counts=new Dictionary<string,int>();
-  internal readonly List<Thread> Jobs=new List<Thread>();internal Stopwatch ShellClock,LayoutClock,MediaClock;
+  internal readonly List<Thread> Jobs=new List<Thread>();internal Stopwatch ShellClock,LayoutClock,MediaClock;bool memoryPressure;
   internal Peer(string path):base(path,FileMode.CreateNew,FileAccess.ReadWrite,FileShare.ReadWrite,1,FileOptions.Asynchronous){}
   internal int Count(string kind){int count;return Counts.TryGetValue(kind,out count)?count:0;}
   internal void Later(int delay,Action action){var t=new Thread(()=>{Thread.Sleep(delay);action();}){IsBackground=true};Jobs.Add(t);t.Start();}
@@ -35,7 +35,7 @@ public static class StartupReadinessTests {
   internal void Value(Request request,object value,int delay=0,string wrongSession=null){Reply(request,Json.Obj("result",Json.Obj("type","object","value",value)),delay,wrongSession);}
   internal Dictionary<string,object> Status(bool media){return Json.Obj(
    "attached",media,"mediaReady",media,"prepared",media,"disposed",false,"playing",false,"wallpaperApplied",false,"revealed",false,"layoutSupported",true,
-   "manuallyPaused",false,"probeOnly",false,"firstFrameConfirmed",false,"documentHidden",false,"stageVisible",false,"code",media?"prepared":"preparing","mediaTimeMs",0,
+   "manuallyPaused",false,"probeOnly",false,"firstFrameConfirmed",false,"documentHidden",false,"stageVisible",false,"memoryPressure",memoryPressure,"code",media?"prepared":"preparing","mediaTimeMs",0,
    "documentGeneration",Owner.State.DocumentGeneration,"protocolVersion",2,"leaseNeedsRenew",false,"mediaGeneration",media?1:0,"actualPhase",media?"prepared":"preparing","health","fresh",
    "prepareOperationId","","commitAccepted",false,"recoveryNeeded",false,"recoveryStable",false,"recoveryReason","","rendererClockMs",1000,
    "layoutWindowElectron",true,"layoutMainCount",1,"layoutActiveMainCount",1);}
@@ -54,7 +54,8 @@ public static class StartupReadinessTests {
     case "query":Reply(r,Json.Obj("nodeId",2));break;
     case "describe":Reply(r,Json.Obj("node",Json.Obj("backendNodeId",3,"nodeName","INPUT","attributes",new object[]{"id","codex-dragon-file-v1","type","file"})));break;
     case "input":Value(r,Json.Obj("inputReady",true,"multiple",false));break;
-    case "media-status":Value(r,Status(true));break;
+    case "pressure-on":memoryPressure=true;Value(r,Json.Obj("ok",true));break;
+    case "media-status":var status=Status(true);if(memoryPressure){status["mediaReady"]=false;status["prepared"]=false;status["dormant"]=true;status["actualPhase"]="hibernating";status["code"]="hibernating";}Value(r,status);break;
     default:throw new Exception("unexpected request kind "+r.Kind);
    }
   }
@@ -65,7 +66,7 @@ public static class StartupReadinessTests {
    else if(r.Method=="DOM.getDocument")r.Kind="document";else if(r.Method=="DOM.querySelector")r.Kind="query";else if(r.Method=="DOM.describeNode")r.Kind="describe";else if(r.Method=="DOM.setFileInputFiles")r.Kind="files";
    else if(r.Phase==2)r.Kind="root";else if(r.Phase==3)r.Kind="preflight";else if(r.Phase==4)r.Kind=r.Expression.Contains(".configure(")?"configure":"install";
    else if(r.Phase==5)r.Kind="style";else if(r.Phase==6)r.Kind="layout";else if(r.Phase==8)r.Kind="input";
-   else if(r.Phase==10)r.Kind=r.Expression.Contains(".attach(")?"media-attach":r.Expression.Contains(".renewLease(")?"renew":"media-status";
+   else if(r.Phase==10)r.Kind=r.Expression.Contains(".memoryPressure(true)")?"pressure-on":r.Expression.Contains(".attach(")?"media-attach":r.Expression.Contains(".renewLease(")?"renew":"media-status";
    else throw new Exception("unexpected phase "+r.Phase);
    Counts[r.Kind]=Count(r.Kind)+1;r.Number=Count(r.Kind);
    if(r.Kind=="root"&&ShellClock==null)ShellClock=Stopwatch.StartNew();if(r.Kind=="layout"&&LayoutClock==null)LayoutClock=Stopwatch.StartNew();if(r.Kind=="media-attach"&&MediaClock==null)MediaClock=Stopwatch.StartNew();
@@ -129,7 +130,7 @@ public static class StartupReadinessTests {
   Case(root,"layout-eof-fault",f=>f.Peer.Intercept=r=>{if(r.Kind!="layout")return false;typeof(CdpTransport).GetMethod("Fail",Private).Invoke(f.Transport,new object[]{35});return true;},(f,e,ms)=>{Failure(f,e,6,35);Check(f.Transport.Faulted&&f.Peer.Count("layout")==1,"terminal fault retried");});
   Case(root,"layout-write-fault",f=>f.Peer.Intercept=r=>{if(r.Kind!="layout")return false;r.Stall=true;return true;},(f,e,ms)=>{Failure(f,e,6,37);Check(e.TimeoutStage==2&&f.Transport.Faulted&&f.Peer.Count("layout")==1,"write fault retried");});
   Context(root,"disabled-inflight",f=>f.State.Command("disable"),0);
-  Context(root,"pressure",f=>f.Pressure=true,74);
+  Case(root,"layout-pressure-defers-decoder-only",f=>{f.EnablePressure();f.Peer.Intercept=r=>{if(r.Kind!="layout")return false;f.Peer.Later(100,()=>f.Pressure=true);f.Peer.Value(r,f.Peer.Status(false),400);return true;};},(f,e,ms)=>{Check(e==null&&!f.State.Disabled&&!f.State.Ready&&!f.State.Prepared&&f.State.MemoryPressure&&f.State.Attached&&f.State.ActualPhase=="hibernating","pressure did not defer decoder safely");Check(f.Peer.Count("document")==1&&f.Peer.Count("media-attach")==1&&f.Peer.Count("pressure-on")==1,"lightweight preparation was restarted or skipped");Check(ms<1500,"pressure introduced extra preparation wait");});
   Context(root,"session-changed",f=>Set(f.Session,"session","changed_session"),72);
   Context(root,"document-generation-changed",f=>Set(f.State,"DocumentGeneration",Guid.NewGuid().ToString("N")),72);
   Context(root,"target-lost",f=>Set(f.Session,"targetLost",true),72);

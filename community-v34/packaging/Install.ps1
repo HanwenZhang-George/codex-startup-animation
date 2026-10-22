@@ -1,10 +1,12 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Destination=(Join-Path $env:LOCALAPPDATA 'Programs\CodexDragonPublic'),
     [switch]$CreateDesktopShortcut,
+    [switch]$BindOfficialDesktopShortcut,
     [switch]$SkipConfiguration
 )
 . (Join-Path $PSScriptRoot 'PackageTools.ps1')
+if($CreateDesktopShortcut -and $BindOfficialDesktopShortcut){throw 'Choose either a separate community shortcut or binding the existing official desktop shortcut, not both.'}
 Assert-SupportedPlatform
 $source=Assert-RegularPath $PSScriptRoot
 $destination=(Assert-RegularPath $Destination).TrimEnd('\')
@@ -56,5 +58,28 @@ if($CreateDesktopShortcut) {
         Write-Utf8 (Join-Path $destination 'install-state.json') ($state|ConvertTo-Json -Depth 5)
     }
 }
+if($BindOfficialDesktopShortcut) {
+    # Only this explicitly requested path touches a shortcut. The ordinary
+    # installation and daily launcher never elevate or rewrite desktop links.
+    try {
+        . (Join-Path $destination 'OfficialShortcut.ps1')
+        $identity=Get-RegisteredOfficialShortcutIdentity
+        $installStatePath=Join-Path $destination 'install-state.json'
+        $installState=Get-Content -LiteralPath $installStatePath -Raw -Encoding UTF8|ConvertFrom-Json
+        $installState|Add-Member -NotePropertyName officialBindingRequested -NotePropertyValue $true -Force
+        # Durable independent ownership marker must precede every desktop write.
+        Write-ShortcutState $installStatePath $installState
+        $binding=Set-OfficialDesktopShortcutBinding $destination ([Environment]::GetFolderPath('DesktopDirectory')) $identity
+        if($binding -eq 'bound'){
+            Write-Output 'Bound the original current-user Codex desktop shortcut. Its name, visible settings and official icon are retained; original bytes are backed up separately.'
+            Write-Output 'The new shortcut is a plain local launcher link. No AppID activation redirect or administrator requirement is retained.'
+        }else{
+            $installState.officialBindingRequested=$false;Write-ShortcutState $installStatePath $installState
+            Write-Warning ('Installation succeeded; desktop binding skipped: '+$binding+'. The original shortcut was not replaced. Start the installed Launch.exe instead.')
+        }
+    }catch {
+        Write-Warning ('Installation succeeded, but optional desktop binding did not complete ('+$_.Exception.GetType().Name+'). Installation and any .official-shortcut recovery files were retained. No automatic elevation was requested.')
+    }
+}
 Write-Output ('Installed complete release. Start with: '+(Join-Path $destination 'Launch.exe'))
-Write-Output 'The official Codex app, its original icon, account data, and running sessions were not modified.'
+Write-Output 'Official Codex application files, account data and running sessions were not modified. Optional desktop binding is reversible during uninstall.'

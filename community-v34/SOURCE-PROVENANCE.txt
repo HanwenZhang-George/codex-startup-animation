@@ -1,5 +1,33 @@
 Public packaging candidate, based on the V34 repaired runtime.
 
+The r8 test candidate fixes startup resource-protection cleanup that sent a
+terminal disable to the wallpaper host. It releases optional animation resources
+while retaining the normal reveal intent, including late-session cleanup. It
+does not weaken thresholds or claim playback will succeed under persistent
+resource pressure. The supplied r7 report confirms resource protection and
+subsequent all-hidden window observations; the exact protection reason was not
+retained by the old parser. New diagnostics retain allowlisted reasons and
+separate prior startup failure from the most recent replay attempt.
+An owned authenticated-pipe fixture also reproduced a queued reveal timing out
+behind a valid 1700 ms preparation. Lock contention now shares the original
+3000 ms drain deadline, while exchange IO remains at most 1500 ms and within
+that same deadline. No mutation retry or terminal-disable reversal is added.
+An owned native-window fixture reproduced a legal showCmd=1 snapshot whose
+pending hide ran after fallback incorrectly released its lease. Failure rollback
+now queues one nonactivating visibility compensation, preserves user minimization
+and moved geometry, and retains its small journal if completion is unconfirmed.
+The helper's original 800 ms recovery budget is unchanged. Normal Commit still
+releases the lease. This proves a reachable race, not that the remote report
+identified the exact cause of all its hidden-window observations.
+
+The r7 test candidate adds minimum-read process handles for existing-window
+replay, bounded replay rejection diagnostics, completed-start resource summaries,
+and optional per-user original desktop-shortcut binding with verified restore.
+The supplied r6 report showed a successful ~30.7 s cold start, followed by three
+unclassified replay target rejections. A restricted-ACL reproduction proves one
+compatibility defect; it does not prove the remote machine used that branch.
+The target machine must retest this complete candidate before publication.
+
 Upstream project: https://github.com/mytjxs/codex-startup-animation
 Customization and release packaging contributor: HanwenZhang-George (GitHub).
 This is a community customization, not an official OpenAI distribution.
@@ -48,3 +76,29 @@ Native-window and named-pipe fixtures exercise these paths in isolation.
 Reference API semantics: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindowasync
 All original media and visual settings remain unchanged; this is a test candidate,
 not a claim that every target-machine startup or performance issue is resolved.
+
+The r6 compatibility candidate starts from the downloaded public r5 archive:
+SHA-256 E10D595C28821D1FF232E01FB7B00AF9AFFF7C2462C3F7E62EAAFAA40E456354.
+It fixes delayed composer style-cache invalidation and accessibility specificity,
+decouples verified layout binding from a DOM engine-name label, and scopes existing
+process detection to the current Windows session. It adds allowlisted diagnostic
+layout reasons, bounded media presence and registered-package runtime evidence.
+These changes do not implement Tauri/Wry/WebView2 transport or relax signed-client,
+owned-process, exact-page-origin or private-pipe safety checks.
+Normal visual values and all original media remain unchanged. Synthetic browser,
+latency/IPC and process policy tests do not establish real GPU performance or OS
+multi-session integration. Target-PC user testing remains the publication gate.
+The lightweight Diagnostics support folder is a permanent, separately located
+part of the formal release. Generated Reports, runtime logs, local configuration
+and developer test results are excluded from publication. Publication preserves
+all tested executable, media, source and support-tool hashes.
+
+The r9 candidate is isolated from the user's running installations and from the
+frozen r8 candidate. It removes physical-memory-only shutdown policy, retains a
+512 MiB process-commit floor, and converts critical preparation pressure into the
+existing recoverable decoder hibernation lifecycle. Its renderer retains validated
+File handles without allocating a Blob/decoder during critical commit pressure.
+Diagnostics distinguish historical terminal host code 174 from current recoverable
+pressure states; recovery acknowledgement is not presented as playback success.
+Tests use synthetic memory readings and an isolated offline browser with original
+media, never intentionally exhaust the test machine's memory. No quality reduction.

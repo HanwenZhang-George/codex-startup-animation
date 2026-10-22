@@ -64,7 +64,9 @@ foreach($record in $mediaManifest.files){[void]$pins.AppendLine(('new MediaPin{{
 [void]$pins.AppendLine('}; } }')
 $pinsPath=Join-Path $build 'BootstrapPins.cs';Write-Utf8 $pinsPath $pins.ToString()
 Compile 'Launch.exe' 'CodexDragonPublic.PortableLaunch' ($hostFiles+@((Join-Path $source 'packaging/PortableLaunch.cs'),$pinsPath))
-foreach($name in @('Install.ps1','Uninstall.ps1','PackageTools.ps1','Collect-DiagnosticReport.ps1','DiagnosticReport.Common.ps1')){Copy-Item -LiteralPath (Join-Path $source ('packaging/'+$name)) -Destination $output}
+foreach($name in @('Install.ps1','Install-and-Bind.cmd','Uninstall.ps1','OfficialShortcut.ps1','PackageTools.ps1','Collect-DiagnosticReport.ps1','DiagnosticReport.Common.ps1','CompatibilityProbe.ps1','DiagnosticAnalysis.ps1')){Copy-Item -LiteralPath (Join-Path $source ('packaging/'+$name)) -Destination $output}
+[void][IO.Directory]::CreateDirectory((Join-Path $output 'Diagnostics'))
+foreach($name in @('Run-Diagnostics.ps1','One-Click-Diagnostics.cmd','Check-All-Files.cmd','README.txt')){Copy-Item -LiteralPath (Join-Path $source ('packaging/Diagnostics/'+$name)) -Destination (Join-Path $output 'Diagnostics')}
 Copy-Item -LiteralPath (Join-Path $source 'README.txt') -Destination $output
 Copy-Item -LiteralPath (Join-Path $source 'FONT-LICENSE.txt') -Destination $output
 Copy-Item -LiteralPath (Join-Path $source 'START-HERE.txt') -Destination $output
@@ -76,7 +78,7 @@ foreach($name in $codeFiles){Copy-Item -LiteralPath (Join-Path $source $name) -D
 foreach($folder in @('src','wallpaper-host-src','packaging','build-inputs','tests')){Copy-Item -LiteralPath (Join-Path $source $folder) -Destination $codeTarget -Recurse}
 Write-Utf8 (Join-Path $output 'build/build-receipt.json') (@{schemaVersion=1;compiler='Windows .NET Framework 4.x csc.exe';components=@($compiled);sourcePathsAreRelative=$true;fullMediaVerified=$true}|ConvertTo-Json -Depth 6)
 $records=@(Get-ChildItem -LiteralPath $output -Recurse -File|Sort-Object FullName|ForEach-Object {[ordered]@{path=$_.FullName.Substring($output.Length+1).Replace('\','/');bytes=$_.Length;sha256=Get-Sha256 $_.FullName}})
-Write-Utf8 (Join-Path $output 'release-manifest.json') (@{schemaVersion=1;product='CodexDragonPublic';version='34.1-native-ack-r5-test';files=$records}|ConvertTo-Json -Depth 6)
+Write-Utf8 (Join-Path $output 'release-manifest.json') (@{schemaVersion=1;product='CodexDragonPublic';version='34.2-memory-policy-r9-test';files=$records}|ConvertTo-Json -Depth 6)
 Test-PackageFiles $output (Read-PackageManifest $output)
 if(-not $SkipZip) {
     $zip=$output+'.zip';if(Test-Path -LiteralPath $zip){throw 'ZIP already exists; choose a fresh output directory.'}

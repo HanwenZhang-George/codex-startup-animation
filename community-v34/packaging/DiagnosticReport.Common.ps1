@@ -1,5 +1,6 @@
 ﻿Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+$script:PortableReportToolsRoot=[IO.Path]::GetDirectoryName($PSCommandPath)
 
 function Stop-Fix([string]$Code) { throw [IO.InvalidDataException]::new('FCP-'+$Code) }
 
@@ -60,7 +61,7 @@ function Get-FixEventToken([string]$Body,[string]$Key) {
 }
 function Get-FixEventNumber([string]$Body,[string]$Key,[long]$Maximum,[long]$Minimum=-1) {
     $token=Get-FixEventToken $Body $Key;$number=0L
-    if($null -ne $token -and $token -cmatch '^-?[0-9]{1,14}$' -and [long]::TryParse($token,[ref]$number) -and $number -ge $Minimum -and $number -le $Maximum){return $number}
+    if($null -ne $token -and $token -cmatch '^-?[0-9]{1,15}$' -and [long]::TryParse($token,[ref]$number) -and $number -ge $Minimum -and $number -le $Maximum){return $number}
     return -1L
 }
 function Get-FixEventEnum([string]$Body,[string]$Key,[string[]]$Known) {
@@ -88,9 +89,36 @@ function Add-FixSnapshotFields($Fields,[string]$Body,[switch]$Runtime) {
     $Fields['rendererCode']=Get-FixEventEnum $Body 'rendererCode' @('idle','loading','prepared','playing','reveal-pending','ready-hidden','resuming','paused','hibernating','disposed','unsupported-layout','unverified','media-error','play-rejected','first-frame-timeout','reveal-timeout','resume-timeout','playback-stalled','invalid-file','file-too-large','retired','recovery-budget-exhausted')
     $Fields['actualPhase']=Get-FixEventEnum $Body 'actualPhase' @('retired','faulted','hibernating','paused','resuming','gap','preparing','prepared','visible')
     $Fields['health']=Get-FixEventEnum $Body 'health' @('faulted','stale','fresh')
+    $Fields['layoutReason']=Get-FixEventEnum $Body 'layoutReason' @('not-checked','root-missing','main-count','main-token','workspace-shape','shell-shape','composer-ambiguous','ready')
+}
+function Add-FixExceptionFields($Fields,[string]$Body) {
+    $Fields['exceptionType']=Get-FixEventEnum $Body 'exceptionType' @('None','OtherException','InvalidOperationException','ArgumentException','ArgumentOutOfRangeException','TimeoutException','IOException','InvalidDataException','EndOfStreamException','FileNotFoundException','DirectoryNotFoundException','UnauthorizedAccessException','Win32Exception','SecurityException','SerializationException','XmlException','ObjectDisposedException','AggregateException')
+    $Fields['nativeErrorCode']=Get-FixEventNumber $Body 'nativeErrorCode' 2147483647 0
+    $Fields['hresult']=Get-FixEventNumber $Body 'hresult' 2147483647 -2147483648
 }
 function Convert-FixHandoff([string]$Body,[string]$Utc) {
     $fields=[ordered]@{utc=$Utc}
+    if($Body.StartsWith('Startup resource protection: ',[StringComparison]::Ordinal)){
+        $value=$Body.Substring('Startup resource protection: '.Length)
+        $reason=if($value -cin @('system-memory-pressure','system-commit-pressure','wallpaper-commit-pressure','startup-private-memory-limit','startup-sustained-cpu-limit','startup-resource-monitor-unavailable')){$value}else{'unknown'}
+        return [pscustomobject]@{utc=$Utc;category='startup-resource-protection';resourceReason=$reason}
+    }
+    if($Body -ceq 'Startup animation released for resource protection; wallpaper preparation continues; no success finale'){
+        return [pscustomobject]@{utc=$Utc;category='startup-resource-animation-released'}
+    }
+    if($Body.StartsWith('replay-native-candidates phase=',[StringComparison]::Ordinal)){
+        $fields.category='replay-native-candidates';$fields.phase=Get-FixEventNumber $Body 'phase' 4 1
+        foreach($key in @('verifiedWindows','visible','hidden','cloaked','eligible')){$fields[$key]=Get-FixEventNumber $Body $key 99999 0}
+        return [pscustomobject]$fields
+    }
+    if($Body.StartsWith('replay-diagnostic operation=',[StringComparison]::Ordinal)){
+        $fields.category='replay-diagnostic';$fields.operation=Get-FixEventEnum $Body 'operation' @('find','attest')
+        $fields.phase=Get-FixEventNumber $Body 'phase' 16 0
+        $fields.reason=Get-FixEventNumber $Body 'reason' 32 0
+        $fields.elapsedMs=Get-FixEventNumber $Body 'elapsedMs' 31536000000 0
+        Add-FixExceptionFields $fields $Body
+        return [pscustomobject]$fields
+    }
     $nativeWait=$Body.StartsWith('Native readiness waiting after placement; ',[StringComparison]::Ordinal)
     $placementWait=$Body.StartsWith('Compact placement waiting; ',[StringComparison]::Ordinal)
     if($nativeWait -or $placementWait){
@@ -102,7 +130,7 @@ function Convert-FixHandoff([string]$Body,[string]$Utc) {
     }
     if($Body.StartsWith('Startup resource sample; ',[StringComparison]::Ordinal)){
         $fields.category='startup-resource-sample'
-        $limits=[ordered]@{elapsedMs=31536000000;intervalMs=31536000000;cpuPermille=1000;privateBytes=281474976710656;availablePhysicalBytes=281474976710656;totalPhysicalBytes=281474976710656;availableCommitBytes=281474976710656;totalCommitBytes=281474976710656;logicalProcessors=4096;lowMemory=1}
+        $limits=[ordered]@{elapsedMs=31536000000;intervalMs=31536000000;cpuPermille=1000;privateBytes=281474976710656;availablePhysicalBytes=281474976710656;totalPhysicalBytes=281474976710656;availableCommitBytes=281474976710656;totalCommitBytes=281474976710656;logicalProcessors=4096;lowMemory=1;notificationLow=1}
         foreach($key in $limits.Keys){$fields[$key]=Get-FixEventNumber $Body $key $limits[$key]}
         return [pscustomobject]$fields
     }
@@ -137,6 +165,7 @@ function Convert-FixHandoff([string]$Body,[string]$Utc) {
     }
     if($Body.StartsWith('bridge-diagnostic trace=',[StringComparison]::Ordinal)){
         $fields.category='bridge-diagnostic';$fields.operation=Get-FixEventEnum $Body 'operation' @('discover','open')
+        Add-FixExceptionFields $fields $Body
         foreach($key in @('phase','reason')){$fields[$key]=Get-FixEventNumber $Body $key 16}
         $fields.elapsedMs=Get-FixEventNumber $Body 'elapsedMs' 31536000000;$fields.disposition=Get-FixEventNumber $Body 'disposition' 3;$fields.mediaCode=Get-FixEventNumber $Body 'mediaCode' 65535
         $fields.outcome=Get-FixEventEnum $Body 'outcome' @('none','wallpaper-disabled','bridge-reused','bridge-discovery-normal-fallback','bridge-unknown-no-second-launch','wallpaper-unavailable-existing-process','wallpaper-host-missing','wallpaper-host-start-failed','bridge-started','bridge-not-started-normal-fallback','bridge-existing-normal-reuse','activation-failed')
@@ -144,12 +173,15 @@ function Convert-FixHandoff([string]$Body,[string]$Utc) {
     }
     $stage=[regex]::Match($Body,'\Astartup-stage=(?<stage>launcher-entry|launcher-validated|launcher-create-film|launcher-show-film|replay-target-unavailable-no-activation|replay-existing-window-pinned) pid=\d{1,10} elapsedMs=(?<elapsed>\d{1,11})\z')
     if($stage.Success -and [long]$stage.Groups['elapsed'].Value -le 31536000000){return [pscustomobject]@{utc=$Utc;category='launcher-stage';stage=$stage.Groups['stage'].Value;elapsedMs=[long]$stage.Groups['elapsed'].Value}}
+    $commandFailure=[regex]::Match($Body,'\AWallpaper bridge command failed: (?<command>reveal|pause|disable|status|refresh|prepare|commit)\z')
+    if($commandFailure.Success){return [pscustomobject]@{utc=$Utc;category='wallpaper-command-failed';command=$commandFailure.Groups['command'].Value}}
     $exact=@{
         'Living intro started; speed=1; maximumVideoSurfaces=2'='living-intro-started'
         'Living idle entered; speed=1'='living-idle-entered'
         'Living playback released; videoSurfaces=0'='living-playback-released'
         'Cleanup complete: decoder, local pulse and timers released; no desktop shield'='launcher-cleanup-complete'
         'Animation cancelled; restoring target placement'='animation-cancelled'
+        'Native recovery still unconfirmed after bounded retry'='native-recovery-unconfirmed'
         'Animation explicitly skipped; wallpaper preparation continues; no success finale'='animation-skipped'
         'Wallpaper host process ended during startup; stale preparation discarded'='wallpaper-host-exited'
         'Movie hidden beneath prepared cover; decoder retained through reveal'='movie-hidden-for-reveal'
@@ -228,6 +260,7 @@ function Convert-FixLogEvent([string]$Line,[string]$Relative) {
                 Add-FixSnapshotFields $fields $body
             }
             if($fields.phase -eq 38){
+                $fields.layoutReason=Get-FixEventEnum $body 'layoutReason' @('not-checked','root-missing','main-count','main-token','workspace-shape','shell-shape','composer-ambiguous','ready')
                 # Keep absent, malformed, duplicated and unknown values explicitly unknown.
                 $snapshotLimits=[ordered]@{rootReady=1;bodyReady=1;layoutSupported=1;documentHidden=1;attached=1;mediaReady=1;prepared=1;disposed=1;firstFrameConfirmed=1;generationMatches=1;layoutWindowElectron=1;layoutMainCount=129;layoutActiveMainCount=129}
                 foreach($key in $snapshotLimits.Keys){
@@ -246,6 +279,11 @@ function Convert-FixLogEvent([string]$Line,[string]$Relative) {
                 $fields.requestElapsedMs=Get-FixEventNumber $body 'requestElapsedMs' 31536000000 0
                 $fields.requestBudgetMs=Get-FixEventNumber $body 'requestBudgetMs' 750 1
                 $fields.timeoutStage=Get-FixEventNumber $body 'timeoutStage' 3 0
+            }
+            if($fields.phase -eq 43 -and $normalHeader -and $fields.code -eq 0){
+                # Request/pressure evidence is not proof of resumed playback.
+                $fields.pressureState=Get-FixEventEnum $body 'pressureState' @('suspended','resume-requested')
+                foreach($key in @('availableCommitBytes','totalCommitBytes')){$fields[$key]=Get-FixEventNumber $body $key 281474976710656}
             }
             return [pscustomobject]$fields
         }
@@ -307,16 +345,54 @@ function Read-PortableReportManifest([string]$Root) {
     Assert-FixRecords $Root $manifest.files $count
     $sha=[Security.Cryptography.SHA256]::Create()
     try {$hash=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','')}finally{$sha.Dispose()}
-    return [pscustomobject]@{sha256=$hash;declaredFileCount=$count}
+    return [pscustomobject]@{sha256=$hash;declaredFileCount=$count;files=$manifest.files}
+}
+function Get-PortableMediaPresence([string]$Root,$Records) {
+    # A quick size/presence check, explicitly not a hash or decoder verification.
+    # Only known package media roles may be exported, never caller-selected paths.
+    $roles=[ordered]@{
+        startup='output/codex-startup-2k-144fps-crf16.mp4'
+        intro='output/versions/startup-living-v6/startup-intro.mp4'
+        idle='output/versions/startup-living-v6/startup-idle.mp4'
+        finale='output/versions/startup-living-v6/startup-finale.mp4'
+        ambient='output/versions/ai-refined-v4/dragon-wallpaper-ambient-2k-144fps.mp4'
+        particles='output/versions/particle-v33/dragon-wallpaper-particles-1440p48.mp4'
+    }
+    $result=@()
+    foreach($role in $roles.Keys){
+        $entry=[ordered]@{role=$role;state='unavailable';bytes=-1L;declaredBytes=-1L;sizeMatches=-1;hashVerified=$false;decodingVerified=$false}
+        $declared=@($Records|Where-Object {$_.path -ceq $roles[$role]})
+        if($declared.Count -eq 1){$entry.declaredBytes=[long]$declared[0].bytes}
+        try {
+            $path=Join-FixPath $Root $roles[$role]
+            [void](Assert-FixPath $path)
+            if([IO.File]::Exists($path)){
+                $entry.state='present';$entry.bytes=([IO.FileInfo]::new($path)).Length
+                if($entry.declaredBytes -ge 0){$entry.sizeMatches=[int]($entry.bytes -eq $entry.declaredBytes)}
+            }else{$entry.state='missing'}
+        }catch{}
+        $result+= [pscustomobject]$entry
+    }
+    return ,$result
 }
 function Get-PortableDiagnosticReport([string]$ReleaseRoot) {
     $root=Assert-FixPath $ReleaseRoot -Directory
     $manifest=Read-PortableReportManifest $root
     $logs=@();foreach($name in @('diagnostics/portable-launch.log','output/wallpaper-readiness.log.1','output/wallpaper-readiness.log','output/handoff-latest.log','output/launcher-error.txt','output/launcher-media-error.txt')){$logs+=Read-FixLogTail $root $name}
+    $compatibility=[pscustomobject]@{schemaVersion=1;kind='CodexCompatibilityEvidence';registrationState='not-collected';transportSupportVerified=$false}
+    try {
+        $probe=Join-FixPath $script:PortableReportToolsRoot 'CompatibilityProbe.ps1'
+        if(Test-Path -LiteralPath $probe -PathType Leaf){
+            [void](Assert-FixPath $probe -File)
+            . $probe
+            $compatibility=Get-CodexCompatibilityInventory
+        }
+    }catch{$compatibility=[pscustomobject]@{schemaVersion=1;kind='CodexCompatibilityEvidence';registrationState='unavailable';transportSupportVerified=$false}}
     return [pscustomobject][ordered]@{
         schemaVersion=1;kind='CodexDragonStartupFixReport';collectedUtc=[DateTime]::UtcNow.ToString('o')
         targetManifestSha256=$manifest.sha256;declaredFileCount=$manifest.declaredFileCount;verifiedFileCountAtPreparation=-1
         logByteLimit=262144;logRecordLimit=128;rawLogsIncluded=$false;logs=$logs
+        compatibility=$compatibility;mediaPresence=(Get-PortableMediaPresence $root $manifest.files)
     }
 }
 function Write-PortableDiagnosticReport([string]$ReleaseRoot) {
