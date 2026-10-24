@@ -1,4 +1,4 @@
-# Optional, current-user desktop binding. Loading this file has no side effects.
+﻿# Optional, current-user desktop binding. Loading this file has no side effects.
 function Assert-ShortcutLocalPath([string]$Path) {
     $full=[IO.Path]::GetFullPath($Path)
     if($full -notmatch '^[A-Za-z]:\\' -or $full.Substring(2).Contains(':') -or $full.Length -gt 2048){throw 'Unsupported local shortcut path.'}
@@ -93,25 +93,51 @@ public static class CodexDragonShortcutV1 {
 }
 function Get-RegisteredOfficialShortcutIdentity {
     $appIds=[Collections.Generic.List[string]]::new();$executables=[Collections.Generic.List[string]]::new()
+    $seenPackages=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $seenExecutables=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $packages=@(Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop)
     if($packages.Count -gt 32){throw 'Ambiguous official package registration.'}
     foreach($package in $packages){
         if($package.PackageFamilyName -cne 'OpenAI.Codex_2p2nqsd0c76g0'){continue}
+        $fullName=[string]$package.PackageFullName
+        if([string]::IsNullOrEmpty($fullName) -or $fullName.Length -gt 240){continue}
+        $match=[regex]::Match($fullName,'\AOpenAI\.Codex_([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)_x64__2p2nqsd0c76g0\z')
+        $version=[version]'0.0.0.0'
+        if(-not $match.Success -or -not [version]::TryParse($match.Groups[1].Value,[ref]$version) -or
+            $version.Major -gt 65535 -or $version.Minor -gt 65535 -or $version.Build -gt 65535 -or $version.Revision -gt 65535){continue}
+        if(-not $seenPackages.Add($fullName)){throw 'Ambiguous official package registration.'}
         $root=Assert-ShortcutLocalPath $package.InstallLocation
         $manifest=Assert-ShortcutLocalPath (Join-Path $root 'AppxManifest.xml')
-        if((Get-Item -LiteralPath $manifest).Length -gt 65536){continue}
-        $settings=[Xml.XmlReaderSettings]::new();$settings.DtdProcessing=[Xml.DtdProcessing]::Prohibit;$settings.XmlResolver=$null;$settings.MaxCharactersInDocument=65536
+        if((Get-Item -LiteralPath $manifest).Length -gt 2097152){throw 'Official manifest is too large.'}
+        $settings=[Xml.XmlReaderSettings]::new();$settings.DtdProcessing=[Xml.DtdProcessing]::Prohibit;$settings.XmlResolver=$null;$settings.MaxCharactersInDocument=2097152
         $reader=[Xml.XmlReader]::Create($manifest,$settings)
         try{$xml=[Xml.XmlDocument]::new();$xml.XmlResolver=$null;$xml.Load($reader)}finally{$reader.Dispose()}
-        foreach($application in $xml.SelectNodes('/*[local-name()="Package"]/*[local-name()="Applications"]/*[local-name()="Application"]')){
-            $id=$application.GetAttribute('Id');if($id -cmatch '^[A-Za-z0-9.]{1,64}$'){$appIds.Add($package.PackageFamilyName+'!'+$id)}
+        # Match OfficialIdentityResolver.ReadPackage/ManifestExecutable and its
+        # exact publisher allowlist. Neither old executable names nor a version
+        # directory is retained across discovery calls.
+        $identities=$xml.SelectNodes('/*[local-name()="Package"]/*[local-name()="Identity"]')
+        if($identities.Count -ne 1 -or $identities[0].GetAttribute('Name') -cne 'OpenAI.Codex' -or
+            $identities[0].GetAttribute('ProcessorArchitecture') -cne 'x64' -or $identities[0].GetAttribute('Version') -cne $version.ToString()){throw 'Official manifest identity does not match registration.'}
+        $applications=$xml.SelectNodes('/*[local-name()="Package"]/*[local-name()="Applications"]/*[local-name()="Application"][@Id="App"]')
+        if($applications.Count -ne 1){throw 'Official App entry is ambiguous.'}
+        $relative=$applications[0].GetAttribute('Executable')
+        if([string]::IsNullOrWhiteSpace($relative) -or $relative.Length -gt 512 -or [IO.Path]::IsPathRooted($relative) -or
+            $relative.IndexOfAny([char[]]@(':',[char]0,'%','$','"')) -ge 0){throw 'Unsafe official manifest executable.'}
+        $relative=$relative.Replace('/','\')
+        foreach($component in $relative.Split('\')){
+            if($component.Length -eq 0 -or $component -eq '.' -or $component -eq '..' -or $component.EndsWith('.') -or $component.EndsWith(' ') -or
+                $component.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0){throw 'Unsafe official manifest executable.'}
         }
-        foreach($relative in @('app\ChatGPT.exe','app\Codex.exe')){
-            $exe=Assert-ShortcutLocalPath (Join-Path $root $relative)
-            if(-not [IO.File]::Exists($exe)){continue}
-            $signature=Get-AuthenticodeSignature -LiteralPath $exe
-            if($signature.Status -eq 'Valid' -and $null -ne $signature.SignerCertificate -and $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false) -match '^OpenAI(?:[ ,.]|$)'){$executables.Add($exe)}
-        }
+        $boundary=$root.TrimEnd('\')+'\';$exe=Assert-ShortcutLocalPath (Join-Path $root $relative)
+        if(-not $exe.StartsWith($boundary,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($exe) -ine '.exe' -or -not [IO.File]::Exists($exe)){throw 'Official manifest executable is unavailable.'}
+        $signature=Get-AuthenticodeSignature -LiteralPath $exe
+        if($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate){continue}
+        $signer=$signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false)
+        if($signer -cnotin @('OpenAI OpCo, LLC','OpenAI, L.L.C.','OpenAI')){continue}
+        if($seenExecutables.Add($exe)){$executables.Add($exe)}
+        if($appIds.Count -eq 0){$appIds.Add('OpenAI.Codex_2p2nqsd0c76g0!App')}
+        # AppID alone is not authorized until the referenced GUI executable has
+        # passed the same identity, path and publisher checks as a direct link.
     }
     return [pscustomobject]@{AppIds=$appIds.ToArray();Executables=$executables.ToArray()}
 }

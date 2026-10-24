@@ -1,4 +1,35 @@
-﻿R10 test candidate provenance (2026-10-22)
+R13 first-launch reliability candidate (2026-10-24)
+Built from sealed public R12 source archive, SHA-256:
+f8834701cf226f69aa6e40e6406373bc13967344d9184dc95be6f852f335cb62
+Original GitHub public R10 provenance is retained below.
+Changes: bounded adaptive cold target discovery, retained initial-hidden ownership
+recovery, fixed-enum loss/exit observations and per-attempt diagnostic analysis.
+All 46 media assets, including six videos, remain byte-identical.
+No current private install or user runtime configuration was copied or modified.
+Not uploaded: affected-machine acceptance is required before publication.
+
+Historical R12 notes:
+R12 isolated reliability review test candidate (2026-10-24)
+Base: fresh GitHub download from community-v34-r5, public R10 contents.
+SHA-256: 3b5f1201ddfb244a93ed2f8391e1c0f048c5956a76ed7a9f8d218e92bea48b07
+Source commit: 165b187da2762f6fadac942b71905e44f39797c9
+Prior isolated R11 archive (kept unchanged):
+d0ecd11377415f35bc6adef23cb4fd577f56632c131b0a5b86d51c02ffb2b244
+All 46 original media/font/image files are retained byte-for-byte.
+Changes: narrow page-surface layout support and shell-attribute rebinding,
+bounded startup/runtime structure and native geometry/environment evidence,
+manifest-derived optional official shortcut discovery, one bounded registered
+identity rediscovery during a valid update race, and regression coverage.
+Also includes one-time initially-minimized replay restoration with exact owned
+rollback and later user-minimize preservation, plus newer public-entry failure
+analysis that does not treat old playback evidence as a new successful launch.
+Media quality, random appearance and resource protections are retained.
+Only the isolated public source was modified. No private installation or
+CC Switch code, local runtime configuration or feedback attachment is included.
+This candidate is not published; affected-computer acceptance is pending.
+
+Historical R10 notes below describe that version only.
+R10 test candidate provenance (2026-10-22)
 Public R9 download: community-v34-r5 / CodexDragon-V34-Portable-Windows-x64-r5.zip
 SHA-256: 9bc3c666a2803b4853378cc984eddf54febf0feb68d5abe1e2b5742199d8b3a5
 All 46 original media/font/image files and renderer.js are retained byte-for-byte.

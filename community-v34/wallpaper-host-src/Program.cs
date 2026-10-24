@@ -110,7 +110,7 @@ internal static class PreparationDiagnostics {
     }
     static readonly string[] SnapshotBooleans={"attached","mediaReady","prepared","disposed","playing","wallpaperApplied","revealed","layoutSupported","firstFrameConfirmed","documentHidden","stageVisible","recoveryNeeded","leaseNeedsRenew","layoutSuspended","memoryPressure","manuallyPaused","videoPaused","videoSeeking","playStarted","frameCallbackPending","preparationTimerPending","frozen"};
     static readonly string[] SnapshotCodes={"idle","loading","prepared","playing","reveal-pending","ready-hidden","resuming","paused","hibernating","disposed","unsupported-layout","unverified","media-error","play-rejected","first-frame-timeout","reveal-timeout","resume-timeout","playback-stalled","invalid-file","file-too-large","retired","recovery-budget-exhausted"};
-    static readonly string[] LayoutReasons={"not-checked","root-missing","main-count","main-token","workspace-shape","shell-shape","composer-ambiguous","ready"};
+    static readonly string[] LayoutReasons={"not-checked","root-missing","main-count","main-token","workspace-shape","shell-shape","composer-ambiguous","frame-count","frame-token","frame-row","frame-shape","ready"};
     static object SnapshotValue(Dictionary<string,object> status,string key){object value;return status!=null&&status.TryGetValue(key,out value)?value:null;}
     static string SnapshotBoolean(object value){return value is bool?((bool)value?"1":"0"):"-1";}
     static string SnapshotNumber(object value,long maximum){
@@ -180,6 +180,20 @@ internal static class PreparationDiagnostics {
             " exceptionType="+ExceptionType(error)+" hresult="+(error==null?0:error.HResult).ToString(System.Globalization.CultureInfo.InvariantCulture)+Environment.NewLine;
     }
     internal static void RecordEvent(int phase,long elapsedMilliseconds,int code,Exception error){try{Enqueue(FormatEvent(phase,elapsedMilliseconds,code,error));}catch{}}
+    internal static string FormatLoss(int sourcePhase,long elapsed,string kind,int fault,int exited){
+        if(sourcePhase<0||sourcePhase>63||fault< -1||fault>99||exited< -1||exited>1||Array.IndexOf(new[]{"transport-fault","target-detached","target-crashed","inspector-detached","unknown"},kind)<0)throw new ArgumentOutOfRangeException();
+        return FormatEvent(46,elapsed,0,null).TrimEnd('\r','\n')+String.Format(System.Globalization.CultureInfo.InvariantCulture," sourcePhase={0} lossKind={1} transportFaultCode={2} processExited={3}",sourcePhase,kind,fault,exited)+Environment.NewLine;
+    }
+    internal static void RecordLoss(int sourcePhase,long elapsed,string kind,int fault,int exited){try{Enqueue(FormatLoss(sourcePhase,elapsed,kind,fault,exited));}catch{}}
+    internal static string FormatProcessExit(long elapsed,bool known,uint code){
+        return FormatEvent(47,elapsed,0,null).TrimEnd('\r','\n')+" processExited=1 exitCodeKnown="+(known?"1":"0")+" processExitCode="+(known?code:0).ToString(System.Globalization.CultureInfo.InvariantCulture)+Environment.NewLine;
+    }
+    internal static void RecordProcessExit(long elapsed,bool known,uint code){try{Enqueue(FormatProcessExit(elapsed,known,code));}catch{}}
+    internal static string FormatInitialVisibility(int outcome,long elapsed,int reason,int hidden,int visible,bool markerOwned,bool complete=true){
+        if(outcome<1||outcome>8||reason<0||reason>6||hidden<0||hidden>129||visible<0||visible>129)throw new ArgumentOutOfRangeException();
+        return FormatEvent(49,elapsed,outcome,null).TrimEnd('\r','\n')+String.Format(System.Globalization.CultureInfo.InvariantCulture," releaseReason={0} eligibleHidden={1} visible={2} markerOwned={3} observationComplete={4}",reason,hidden,visible,markerOwned?1:0,complete?1:0)+Environment.NewLine;
+    }
+    internal static void RecordInitialVisibility(int outcome,long elapsed,int reason,int hidden,int visible,bool markerOwned,bool complete=true){try{Enqueue(FormatInitialVisibility(outcome,elapsed,reason,hidden,visible,markerOwned,complete));}catch{}}
     internal static string FormatRotation(string clip,long cycles,bool available,bool failed,long elapsedMilliseconds){
         if((clip!="ambient"&&clip!="particles")||cycles<0||cycles>Int32.MaxValue||elapsedMilliseconds<0)throw new ArgumentOutOfRangeException();
         return DateTime.UtcNow.ToString("o",System.Globalization.CultureInfo.InvariantCulture)+" phase=35 elapsedMs="+elapsedMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture)+
@@ -223,12 +237,31 @@ internal static class PreparationDiagnostics {
         fields.Append(" sourcePhase=").Append(sourcePhase.ToString(System.Globalization.CultureInfo.InvariantCulture));
         fields.Append(" layoutReason=").Append(SnapshotEnum(SnapshotValue(status,"layoutReason"),LayoutReasons));
         foreach(string key in new[]{"rootReady","bodyReady","layoutSupported","documentHidden","attached","mediaReady","prepared","disposed","firstFrameConfirmed","layoutWindowElectron"})fields.Append(' ').Append(key).Append('=').Append(SnapshotBoolean(SnapshotValue(status,key)));
-        foreach(string key in new[]{"layoutMainCount","layoutActiveMainCount"})fields.Append(' ').Append(key).Append('=').Append(SnapshotNumber(SnapshotValue(status,key),129));
+        fields.Append(" layoutSurfaceKind=").Append(SnapshotEnum(SnapshotValue(status,"layoutSurfaceKind"),new[]{"none","main","frame"}));
+        foreach(string key in new[]{"layoutMainCount","layoutActiveMainCount","layoutFrameCount","layoutActiveFrameCount","layoutWorkspaceRowCount"})fields.Append(' ').Append(key).Append('=').Append(SnapshotNumber(SnapshotValue(status,key),129));
         object actual=SnapshotValue(status,"documentGeneration");fields.Append(" generationMatches=").Append(actual is string&&generation!=null?((string)actual==generation?"1":"0"):"-1");
         return fields.Append(Environment.NewLine).ToString();
     }
     internal static void RecordReadinessObservation(int sourcePhase,long elapsed,Dictionary<string,object> status,string generation){
-        try{Enqueue(FormatReadinessObservation(sourcePhase,elapsed,status,generation));}catch{}
+        // Both records share ReadPreparation's existing one-second throttle.
+        // Split the fixed shape audit from phase 38 to retain the 1 KiB sink
+        // limit; neither call performs another renderer request or measurement.
+        try{Enqueue(FormatReadinessObservation(sourcePhase,elapsed,status,generation));Enqueue(FormatLayoutAudit(sourcePhase,elapsed,status));}catch{}
+    }
+    static readonly string[] LayoutAuditCounts={"layoutAuditFrameCount","layoutAuditActiveFrameCount","layoutAuditAnyMainCount","layoutAuditActiveAnyMainCount","layoutAuditPageSurfaceFrameCount","layoutAuditDirectRowCount","layoutAuditDecorationCount","layoutAuditComposerCount"};
+    static readonly string[] LayoutAuditFlags={"layoutAuditLayoutTokenValid","layoutAuditPageLayoutTokenValid","layoutAuditFrameHashMatches","layoutAuditPageSurfaceFlag","layoutAuditDecorationValid","layoutAuditComposerAmbiguous"};
+    internal static string FormatLayoutAudit(int sourcePhase,long elapsed,Dictionary<string,object> status){
+        if((sourcePhase!=2&&sourcePhase!=6&&sourcePhase!=10&&sourcePhase!=12)||elapsed<0||elapsed>31536000000L)throw new ArgumentOutOfRangeException();
+        var fields=new StringBuilder(FormatEvent(45,elapsed,0,null).TrimEnd('\r','\n'));
+        fields.Append(" sourcePhase=").Append(sourcePhase.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        fields.Append(" layoutReason=").Append(SnapshotEnum(SnapshotValue(status,"layoutReason"),LayoutReasons));
+        fields.Append(" layoutSurfaceKind=").Append(SnapshotEnum(SnapshotValue(status,"layoutSurfaceKind"),new[]{"none","main","frame"}));
+        // The renderer protocol uses numeric flags; arbitrary strings, booleans,
+        // non-integral and out-of-range values remain unknown (-1), not false.
+        foreach(string key in LayoutAuditCounts)fields.Append(' ').Append(key).Append('=').Append(SnapshotNumber(SnapshotValue(status,key),129));
+        foreach(string key in LayoutAuditFlags)fields.Append(' ').Append(key).Append('=').Append(SnapshotNumber(SnapshotValue(status,key),1));
+        string line=fields.Append(Environment.NewLine).ToString();
+        if(line.Length>1024)throw new ArgumentOutOfRangeException();return line;
     }
     internal static string FormatRuntimeObservation(Dictionary<string,object> status,string generation,long elapsed){
         var snapshot=CapturePreparationSnapshot(status,generation,elapsed);
@@ -244,7 +277,9 @@ internal static class PreparationDiagnostics {
         return line.Append(Environment.NewLine).ToString();
     }
     internal static void RecordRuntimeObservation(Dictionary<string,object> status,string generation,long elapsed){
-        try{Enqueue(FormatRuntimeObservation(status,generation,elapsed));Enqueue(FormatPlaybackQuality(status,elapsed));}catch{}
+        // Reuse the existing runtime snapshot and rate limit. Route failures
+        // after preparation need the same structural evidence as cold start.
+        try{Enqueue(FormatRuntimeObservation(status,generation,elapsed));Enqueue(FormatPlaybackQuality(status,elapsed));Enqueue(FormatLayoutAudit(12,elapsed,status));}catch{}
     }
     internal static string FormatRuntimeRequest(int kind,long elapsed,long requestElapsed,int budget,HostFailure error){
         if(kind<1||kind>4||elapsed<0||elapsed>31536000000L||requestElapsed<0||requestElapsed>31536000000L||budget<1||budget>750||error==null||error.TimeoutStage<0||error.TimeoutStage>3)throw new ArgumentOutOfRangeException();
@@ -287,7 +322,12 @@ internal static class PreparationDiagnostics {
             if(schedule)try{if(!ThreadPool.QueueUserWorkItem(_=>Drain()))ResetWriter();}catch{ResetWriter();}
         }catch{}
     }
-    static void ResetWriter(){lock(writerGate){dropped=Math.Min(65535,dropped+pending.Count);pending.Clear();writerBusy=0;}}
+    static void ResetWriter(){lock(writerGate){dropped=Math.Min(65535,dropped+pending.Count);pending.Clear();writerBusy=0;Monitor.PulseAll(writerGate);}}
+    internal static void FlushOnExit(){
+        // Only process termination waits for its last numeric records. Never
+        // block startup or synchronously perform disk IO on the main thread.
+        var clock=Stopwatch.StartNew();lock(writerGate){while(writerBusy!=0){int left=Deadline.Remaining(200,clock.ElapsedMilliseconds);if(left<=0)return;Monitor.Wait(writerGate,left);}}
+    }
     static void Drain(){
         try{for(;;){
             string line;
@@ -296,7 +336,7 @@ internal static class PreparationDiagnostics {
                 // Phase zero is reserved for numeric queue-overflow evidence.
                 // No exception, content, path, or session identifier is logged.
                 else if(dropped!=0){line=FormatEvent(0,0,dropped,null);dropped=0;}
-                else{writerBusy=0;return;}
+                else{writerBusy=0;Monitor.PulseAll(writerGate);return;}
             }
             WriteLine(line);
         }}catch{ResetWriter();}
@@ -333,9 +373,10 @@ internal sealed class RuntimeSnapshotRecorder {
         if(status==null||elapsed<0||elapsed>31536000000L)return;
         string signature=Json.Text(status,"actualPhase")+"|"+Json.Text(status,"health")+"|"+Json.Text(status,"code")+"|"+
             Json.Bool(status,"commitAccepted")+"|"+Json.Bool(status,"firstFrameConfirmed")+"|"+Json.Bool(status,"revealed")+"|"+
-            Json.Bool(status,"documentHidden")+"|"+Json.Bool(status,"memoryPressure")+"|"+Json.Bool(status,"wallpaperApplied");
+            Json.Bool(status,"documentHidden")+"|"+Json.Bool(status,"memoryPressure")+"|"+Json.Bool(status,"wallpaperApplied")+"|"+
+            Json.Bool(status,"layoutSupported")+"|"+Json.Text(status,"layoutReason")+"|"+Json.Text(status,"layoutSurfaceKind");
         // Reuse already validated observations. No timer or extra CDP request.
-        // At most one pair per 2 s on transitions, or per 30 s in steady state.
+        // At most one trio per 2 s on transitions, or per 30 s in steady state.
         if(lastRecorded>=0&&(elapsed-lastRecorded<2000||(signature==lastState&&elapsed-lastRecorded<30000)))return;
         lastRecorded=elapsed;lastState=signature;record(status,generation,elapsed);
     }catch{}}
@@ -470,10 +511,12 @@ internal static class Program {
             PreparationDiagnostics.RecordEvent(startupPhase,startupClock.ElapsedMilliseconds,59,error);
             if(owned!=null){state.MediaError(199);owned.Wait();}else{state.NoStart(59);state.TerminalRead.WaitOne(10000);Thread.Sleep(150);}return 59;
         }finally{
+            if(owned!=null&&owned.ProcessExitState==1){uint exitCode;bool known=owned.TryGetExitCode(out exitCode);PreparationDiagnostics.RecordProcessExit(startupClock.ElapsedMilliseconds,known,exitCode);}
             PreparationDiagnostics.RecordEvent(32,startupClock.ElapsedMilliseconds,0,null);
             if(config!=null)config.ReleaseOfficial();
             // At this point a successfully spawned official process has exited.
             if(owned!=null)owned.Dispose();if(control!=null)control.Dispose();if(published)RemoveDiscovery(session,state);if(locked&&launch!=null)try{launch.ReleaseMutex();}catch{}if(launch!=null)launch.Dispose();
+            PreparationDiagnostics.FlushOnExit();
         }
     }
 }

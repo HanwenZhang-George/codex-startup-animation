@@ -35,6 +35,8 @@ internal sealed class NativeRestoreGuard:IDisposable {
         [DataMember] public int Right {get;set;}
         [DataMember] public int Bottom {get;set;}
         [DataMember] public uint Show {get;set;}
+        [DataMember] public bool InitialMinimizedReplay {get;set;}
+        [DataMember] public bool InitialRestoreToMaximized {get;set;}
         [DataMember] public int ExpectedLeft {get;set;}
         [DataMember] public int ExpectedTop {get;set;}
         [DataMember] public int ExpectedRight {get;set;}
@@ -109,15 +111,18 @@ internal sealed class NativeRestoreGuard:IDisposable {
     }
     internal void Pulse(){Interlocked.Exchange(ref uiHeartbeat,clock.ElapsedMilliseconds);}
     internal Lease Arm(IntPtr window,int l,int t,int r,int b) {
-        IntPtr dpi=Physical();try{return ArmPhysical(window,l,t,r,b);}finally{LeavePhysical(dpi);}
+        IntPtr dpi=Physical();try{return ArmPhysical(window,l,t,r,b,false);}finally{LeavePhysical(dpi);}
     }
-    private Lease ArmPhysical(IntPtr window,int l,int t,int r,int b) {
+    internal Lease ArmInitialMinimizedReplay(IntPtr window,int l,int t,int r,int b) {
+        IntPtr dpi=Physical();try{return ArmPhysical(window,l,t,r,b,true);}finally{LeavePhysical(dpi);}
+    }
+    private Lease ArmPhysical(IntPtr window,int l,int t,int r,int b,bool initialMinimizedReplay) {
         if(!Ready)return null;
         uint pid;if(!IsWindow(window)||GetWindowThreadProcessId(window,out pid)==0)return null;
         Placement p=new Placement{Length=(uint)Marshal.SizeOf(typeof(Placement))};if(!GetWindowPlacement(window,ref p))return null;
         Record record;
         using(var process=Process.GetProcessById((int)pid))record=new Record{Token=Guid.NewGuid().ToString("N"),Window=window.ToInt64(),Pid=(int)pid,Created=process.StartTime.ToUniversalTime().ToFileTimeUtc(),Exe=process.MainModule.FileName,
-            Left=p.Normal.Left,Top=p.Normal.Top,Right=p.Normal.Right,Bottom=p.Normal.Bottom,Show=p.Show,ExpectedLeft=l,ExpectedTop=t,ExpectedRight=r,ExpectedBottom=b,Transition=-1};
+            Left=p.Normal.Left,Top=p.Normal.Top,Right=p.Normal.Right,Bottom=p.Normal.Bottom,Show=p.Show,InitialMinimizedReplay=initialMinimizedReplay&&p.Show==2,InitialRestoreToMaximized=initialMinimizedReplay&&p.Show==2&&(p.Flags&2)!=0,ExpectedLeft=l,ExpectedTop=t,ExpectedRight=r,ExpectedBottom=b,Transition=-1};
         // WINDOWPLACEMENT normal coordinates use monitor-workspace coordinates
         // for a normal top-level window. Capture them before the mutation, so
         // later monitor/taskbar changes cannot expand rollback ownership.
@@ -191,14 +196,26 @@ internal sealed class NativeRestoreGuard:IDisposable {
             current.Normal.Left==r.ExpectedNormalLeft&&current.Normal.Top==r.ExpectedNormalTop&&
             current.Normal.Right==r.ExpectedNormalRight&&current.Normal.Bottom==r.ExpectedNormalBottom;
     }
+    internal static bool OwnsPendingMinimizedPlacement(Record r,Placement current,bool hidden,bool minimized){
+        return hidden&&OwnsInitialMinimizedNormalPlacement(r,current,minimized);
+    }
+    internal static bool OwnsInitialMinimizedNormalPlacement(Record r,Placement current,bool minimized){
+        // The ordinary arm path and old serialized records never acquire this
+        // capability. An owned show compensation can already be visible when
+        // rollback inspects the still-minimized normal rectangle.
+        return r!=null&&r.InitialMinimizedReplay&&r.ExpectedNormalCaptured&&r.Show==2&&minimized&&current.Show==2&&
+            current.Normal.Left==r.ExpectedNormalLeft&&current.Normal.Top==r.ExpectedNormalTop&&
+            current.Normal.Right==r.ExpectedNormalRight&&current.Normal.Bottom==r.ExpectedNormalBottom;
+    }
     private static bool RestorePhysical(Record r){
         if(!Identity(r))return false;IntPtr w=new IntPtr(r.Window);bool restored=true,restorePosition=false;
         Placement current=new Placement{Length=(uint)Marshal.SizeOf(typeof(Placement))};Rect bounds;
         bool hidden=!IsWindowVisible(w),minimized=IsIconic(w),atOwned=GetWindowRect(w,out bounds)&&bounds.Left==r.ExpectedLeft&&bounds.Top==r.ExpectedTop&&bounds.Right==r.ExpectedRight&&bounds.Bottom==r.ExpectedBottom;
         if(GetWindowPlacement(w,ref current)){
             bool atOriginal=current.Normal.Left==r.Left&&current.Normal.Top==r.Top&&current.Normal.Right==r.Right&&current.Normal.Bottom==r.Bottom;
-            restorePosition=!minimized&&(atOwned||(hidden&&atOriginal)||OwnsPendingMaximizedPlacement(r,current,hidden,IsZoomed(w)));
-            if(restorePosition&&!r.PositionRestoreRequested){current.Flags|=4;current.Show=r.Show<=1?4:r.Show==2?7:r.Show;current.Normal=new Rect{Left=r.Left,Top=r.Top,Right=r.Right,Bottom=r.Bottom};restored=SetWindowPlacement(w,ref current);r.PositionRestoreRequested=restored;}
+            restorePosition=(!minimized&&(atOwned||(hidden&&atOriginal)||OwnsPendingMaximizedPlacement(r,current,hidden,IsZoomed(w))))||
+                OwnsInitialMinimizedNormalPlacement(r,current,minimized);
+            if(restorePosition&&!r.PositionRestoreRequested){current.Flags|=4;if(r.InitialMinimizedReplay){current.Flags=(current.Flags&~2U)|(r.InitialRestoreToMaximized?2U:0U);}current.Show=r.Show<=1?4:r.Show==2?7:r.Show;current.Normal=new Rect{Left=r.Left,Top=r.Top,Right=r.Right,Bottom=r.Bottom};restored=SetWindowPlacement(w,ref current);r.PositionRestoreRequested=restored;}
             // The independent helper cannot read the owner's in-memory hide
             // requests. A pre-request visible sample can precede an already
             // queued SW_HIDE, even at the original (not compact) rectangle.

@@ -893,7 +893,7 @@ namespace DragonLauncher
                 // Rediscovering/replacing a window never starts a new 90s wait.
                 int budget=living==null ? 2000 : (int)Math.Max(1,Math.Min(90000,
                     Math.Ceiling((settings.StartupReadyTimeoutSeconds-clock.Elapsed.TotalSeconds)*1000)));
-                targetPlacement=NativeHandoff.PrepareTargetInOverlay(target,this,budget);
+                targetPlacement=NativeHandoff.PrepareTargetInOverlay(target,this,budget,settings.ReplayTarget);
                 lastPlacementWaitLog=-1;
                 Log("Compact placement started; budgetMs="+budget+"; living="+(living!=null));
             }

@@ -14,7 +14,7 @@ const started=Date.now();
 let activeBrowser=null,deadlineHit=false;
 const deadline=setTimeout(()=>{deadlineHit=true;if(activeBrowser)void activeBrowser.close().catch(()=>{});},27000);
 const check=(name,actual,expected=true)=>{assert.deepEqual(actual,expected,name);report.checks.push(name);};
-const allowed=['not-checked','root-missing','main-count','main-token','workspace-shape','shell-shape','composer-ambiguous','ready'];
+const allowed=['not-checked','root-missing','main-count','main-token','workspace-shape','shell-shape','composer-ambiguous','frame-count','frame-token','frame-row','frame-shape','ready'];
 // Synthetic shell uses the audited semantic hierarchy. Minimal paint fixtures
 // model the native custom-property contract; no extracted app bundle is needed.
 const composer='<div id="composer" class="_ComposerLayoutRoot_5est5_2" data-composer-surface-variant="default"><textarea aria-label="Test input"></textarea><button id="send">Send</button></div>';
@@ -67,9 +67,9 @@ const native=`html,body,#root{height:700px;width:1000px;margin:0}#outer{height:7
   check('Composer bound of 16 enforced',(await state()).layoutReason,'composer-ambiguous');
   for(const engine of ['electron','tauri','wry','webview','browser',null]){const s=await setup({engine});check(String(engine)+' strict shape accepted',s.layoutSupported);check(String(engine)+' ready reason',s.layoutReason,'ready');check(String(engine)+' frame transparent',await bg('outer'),'rgba(0, 0, 0, 0)');}
   const invalid=[
-   ['main-count',()=>document.querySelector('main').remove()],
+   ['frame-token',()=>document.querySelector('main').remove()],
    ['main-count',()=>document.querySelector('main').after(document.querySelector('main').cloneNode(true))],
-   ['main-count',()=>document.querySelector('main').setAttribute('data-app-shell-active-page','false')],
+   ['frame-token',()=>document.querySelector('main').setAttribute('data-app-shell-active-page','false')],
    ['main-token',()=>document.querySelector('main').className='ordinary-content'],
    ['workspace-shape',()=>document.querySelector('._WorkspaceContent_etoz9_2').className='_WorkspaceContent_foreign_2'],
    ['shell-shape',()=>document.getElementById('frame').className='_MainContentFrame_foreign_2']
@@ -117,7 +117,7 @@ const native=`html,body,#root{height:700px;width:1000px;margin:0}#outer{height:7
   await page.evaluate(()=>window.savedRoute=document.querySelector('main').cloneNode(true));
   for(let cycle=0;cycle<6;cycle++){
    await page.evaluate(()=>document.querySelector('main').remove());
-   const absent=await state();check('Unmount suspends media '+cycle,absent.layoutSuspended&&!absent.stageVisible&&absent.layoutReason==='main-count');
+   const absent=await state();check('Unmount suspends media '+cycle,absent.layoutSuspended&&!absent.stageVisible&&absent.layoutReason==='frame-token');
    check('Unmount removes own appearance marker '+cycle,await page.evaluate(()=>document.documentElement.hasAttribute('data-codex-dragon-background')),false);
    await page.evaluate(cycle=>{const labels=['tauri','electron',null];const label=labels[cycle%labels.length];if(label===null)document.documentElement.removeAttribute('data-codex-window-type');else document.documentElement.setAttribute('data-codex-window-type',label);document.querySelector('._Workspace_etoz9_2').append(window.savedRoute.cloneNode(true));},cycle);
    await page.waitForFunction(()=>{const s=__codexDragonWallpaperV1.status();return s.layoutSupported&&s.stageVisible&&s.playing;},{},{timeout:2500});

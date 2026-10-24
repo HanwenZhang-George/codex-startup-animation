@@ -114,6 +114,7 @@ internal sealed class OwnedClient : IDisposable {
     [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window,int command);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder name,ref uint size);
     [DllImport("kernel32.dll")] static extern uint GetProcessId(IntPtr process);
+    [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process,out uint exitCode);
     [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct ProcessEntry {
         internal uint Size,Usage,Pid;internal UIntPtr Heap;internal uint Module,Threads,ParentPid;internal int Priority;internal uint Flags;
         [MarshalAs(UnmanagedType.ByValTStr,SizeConst=260)] internal string Exe;
@@ -155,6 +156,9 @@ internal sealed class OwnedClient : IDisposable {
         return GetCloaked(window,14,out cloaked,4)==0&&cloaked==0&&GetWindowRect(window,out rect)&&rect.Right-rect.Left>=128&&rect.Bottom-rect.Top>=128;
     }
     void ClearMarker(){if(markedWindow!=IntPtr.Zero&&marker!=null){uint pid;if(IsWindow(markedWindow)&&GetWindowThreadProcessId(markedWindow,out pid)!=0&&pid==(uint)Pid&&GetProp(markedWindow,marker)==new IntPtr(1))RemoveProp(markedWindow,marker);}markedWindow=IntPtr.Zero;}
+    // A partial enumeration cannot prove that no visible main exists. Even a
+    // retained marker needs at least one observed hidden candidate this turn.
+    static bool CanSelectInitialHiddenWindow(bool complete,int hidden,int visible,bool retained){return complete&&visible==0&&(hidden==1||(hidden>1&&retained));}
     // Install the recovery worker BEFORE CreateProcess. If its construction or
     // start fails, use an ordinary visible launch instead of creating an ownerless
     // hidden client. This worker is separate from renderer/CDP/media failures.
@@ -167,43 +171,66 @@ internal sealed class OwnedClient : IDisposable {
         }catch{visibilityStopped=true;if(visibilityWake!=null)visibilityWake.Dispose();visibilityWake=null;Native.Close(ref launcherParent);return false;}
     }
     void InitialVisibilityLoop(Func<int> request,Action<int,long> diagnostic){
-        var clock=Stopwatch.StartNew();int release=0,lastReport=-1;
+        var clock=Stopwatch.StartNew();int release=0,lastReport=-1,visibilityReports=0;long lastVisibilitySample=-1;
         try{for(;;){
-            bool done=false;
+            bool done=false,markerOwned=false,observationComplete=false;int visibilityOutcome=0,hiddenCount=0,visibleCount=0;
             try{lock(visibilityGate){
                 if(disposed)break;
                 if(ProcessHandle!=IntPtr.Zero){
                     if(Native.WaitForSingleObject(ProcessHandle,0)==0)break;
                     if(release==0){try{release=request==null?0:request();}catch{release=4;}if(release==0&&Created<=0)release=5;if(release==0&&launcherParent!=IntPtr.Zero&&Native.WaitForSingleObject(launcherParent,0)==0)release=6;if(release==0&&clock.ElapsedMilliseconds>=90000)release=3;}
                     if(OwnLiveProcess()){
+                        IntPtr candidate=IntPtr.Zero;
+                        observationComplete=EnumWindows((window,unused)=>{if(MainWindow(window)){if(IsWindowVisible(window))visibleCount++;else{hiddenCount++;candidate=window;}}return true;},IntPtr.Zero);
                         uint markedPid;
                         if(markedWindow!=IntPtr.Zero&&IsWindow(markedWindow)&&GetWindowThreadProcessId(markedWindow,out markedPid)!=0&&markedPid==(uint)Pid&&GetProp(markedWindow,marker)!=new IntPtr(1)){
                             // The guarded native placement explicitly accepted
                             // the first show. Do not depend on sampling a very
                             // short visible interval before a user hides it.
-                            markedWindow=IntPtr.Zero;done=true;
+                            markedWindow=IntPtr.Zero;done=true;visibilityOutcome=5;
                         }
                         if(!done){
-                        IntPtr candidate=IntPtr.Zero;int count=0;bool anyVisible=false;
-                        EnumWindows((window,unused)=>{if(MainWindow(window)){if(IsWindowVisible(window))anyVisible=true;else{count++;candidate=window;}}return true;},IntPtr.Zero);
+                        markerOwned=markedWindow!=IntPtr.Zero&&marker!=null&&MainWindow(markedWindow)&&GetProp(markedWindow,marker)==new IntPtr(1)&&SameProcess();
                         // Any visible main (including a minimized one) means our
                         // initial hide no longer owns presentation. Never pull a
                         // later user hide/minimize back onto the desktop.
-                        if(anyVisible){ClearMarker();done=true;}
-                        else if(count==1&&OwnLiveProcess()&&MainWindow(candidate)&&!IsWindowVisible(candidate)){
+                        if(!observationComplete)visibilityOutcome=7;
+                        else if(visibleCount!=0){ClearMarker();done=true;visibilityOutcome=4;}
+                        else{
+                        // An initially unique window already acquired our exact
+                        // per-process-generation marker. Later hidden auxiliary
+                        // windows do not cancel that retained ownership. Without
+                        // that provenance, initial ambiguity remains untouched.
+                        bool retainedCandidate=hiddenCount>1&&markerOwned&&!IsWindowVisible(markedWindow)&&!IsIconic(markedWindow);
+                        if(retainedCandidate)candidate=markedWindow;
+                        if(CanSelectInitialHiddenWindow(observationComplete,hiddenCount,visibleCount,retainedCandidate)&&OwnLiveProcess()&&MainWindow(candidate)&&!IsWindowVisible(candidate)){
                             if(markedWindow!=candidate&&SameProcess()){ClearMarker();marker=InitialMarker(Pid,Created);if(SetProp(candidate,marker,new IntPtr(1))&&GetProp(candidate,marker)==new IntPtr(1))markedWindow=candidate;}
+                            markerOwned=markedWindow==candidate&&marker!=null&&GetProp(candidate,marker)==new IntPtr(1)&&SameProcess();
+                            visibilityOutcome=markerOwned?1:7;
                             // For fail-open only, the still-live retained
                             // CreateProcess handle proves the PID generation
                             // even if optional image/creation metadata failed.
                             // One successfully queued ordinary show transfers
                             // ownership back to the app; never queue it again.
-                            if(release!=0&&OwnLiveProcess()&&MainWindow(candidate)&&!IsWindowVisible(candidate)&&ShowWindowAsync(candidate,4)){ClearMarker();done=true;}
+                            if(release!=0&&OwnLiveProcess()&&MainWindow(candidate)&&!IsWindowVisible(candidate)&&(!retainedCandidate||(markerOwned&&markedWindow==candidate&&marker!=null&&GetProp(candidate,marker)==new IntPtr(1)&&SameProcess()&&!IsIconic(candidate)))){
+                                if(ShowWindowAsync(candidate,4)){ClearMarker();done=true;visibilityOutcome=6;}else visibilityOutcome=8;
+                            }
+                        }else visibilityOutcome=markedWindow!=IntPtr.Zero?7:(hiddenCount==0?2:3);
                         }
                         }
                     }
                 }
             }}catch{if(release==0)release=4;}
             if(diagnostic!=null&&release!=lastReport&&release!=0){lastReport=release;try{diagnostic(release,clock.ElapsedMilliseconds);}catch{}}
+            // Bounded numeric-only evidence; no steady-state logging and one
+            // reserved slot for a final transfer/yield after intermediate states.
+            try{
+                int hidden=Math.Min(129,hiddenCount),visible=Math.Min(129,visibleCount);
+                long sample=(long)(uint)visibilityOutcome|((long)Math.Max(0,Math.Min(6,release))<<4)|((long)hidden<<8)|((long)visible<<16)|(markerOwned?1L<<24:0)|(observationComplete?1L<<25:0);
+                if(visibilityOutcome!=0&&sample!=lastVisibilitySample&&visibilityReports<(done?8:7)){
+                    lastVisibilitySample=sample;visibilityReports++;PreparationDiagnostics.RecordInitialVisibility(visibilityOutcome,clock.ElapsedMilliseconds,release,hidden,visible,markerOwned,observationComplete);
+                }
+            }catch{}
             if(done)break;
             // A missing/ambiguous window after the startup deadline keeps only
             // a low-frequency release obligation, never an infinite film wait.
@@ -254,6 +281,16 @@ internal sealed class OwnedClient : IDisposable {
         }
     }
     internal bool HasExited { get { return Native.WaitForSingleObject(ProcessHandle,0)==0; } }
+    // Retain the distinction between an observed exit and a missing/invalid
+    // wait handle. Diagnostics must not turn uncertainty into client closure.
+    internal int ProcessExitState { get { lock(visibilityGate){
+        if(disposed||ProcessHandle==IntPtr.Zero||ProcessHandle==new IntPtr(-1))return -1;
+        uint state=Native.WaitForSingleObject(ProcessHandle,0);return state==0?1:(state==258?0:-1);
+    }} }
+    internal bool TryGetExitCode(out uint exitCode){lock(visibilityGate){
+        exitCode=0;if(disposed||ProcessHandle==IntPtr.Zero||ProcessHandle==new IntPtr(-1)||Native.WaitForSingleObject(ProcessHandle,0)!=0)return false;
+        uint value;if(!GetExitCodeProcess(ProcessHandle,out value))return false;exitCode=value;return true;
+    }}
     internal void Wait() {
         if(Native.WaitForSingleObject(ProcessHandle,Native.INFINITE)!=0){
             // A native wait error is not evidence of process exit. Preserve

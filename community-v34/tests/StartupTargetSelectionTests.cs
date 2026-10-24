@@ -67,7 +67,47 @@ public static class StartupTargetSelectionTests {
  }}
  static void EmitFrame(Peer p,Dictionary<string,object> packet){var bytes=Encoding.UTF8.GetBytes(Json.Serializer().Serialize(packet));typeof(CdpTransport).GetMethod("Frame",Flags).Invoke(p.Transport,new object[]{bytes,bytes.Length});}
  public static int Main(string[] args){try{
-  string root=args[0];Directory.CreateDirectory(root);
+  string root=args[0];Directory.CreateDirectory(root);bool lateOnly=args.Length>1&&args[1]=="late-target-only";
+  if(!lateOnly)using(var f=new Fixture(root)){
+   f.Peer.Script=(p,r,n)=>p.Reply(r,Json.Text(r,"method")=="Target.getTargets"?Target(n):Json.Obj("sessionId","slow_fresh_session"),Json.Text(r,"method")=="Target.getTargets"?2400:0);
+   var timer=Stopwatch.StartNew();var failure=f.Select();
+   Check(failure==null,"repeated 2400ms discovery responses must allow a fresh request to finish");
+   Check(f.Peer.Calls==3&&f.Transport.LateResponses==1,"slow discovery must use one fresh retry and discard the old response");
+   Check(timer.ElapsedMilliseconds>=4400&&timer.ElapsedMilliseconds<6000,"slow discovery retry was not bounded");
+   Record("every-discovery-response-2400ms",f,timer,failure,"real SelectTarget/Send/Frame; fresh reply accepted, timed-out ID discarded");
+  }
+  using(var f=new Fixture(root)){
+   var timer=Stopwatch.StartNew();
+   f.Peer.Script=(p,r,n)=>p.Reply(r,Json.Text(r,"method")=="Target.attachToTarget"?Json.Obj("sessionId","cold_13s_session"):timer.ElapsedMilliseconds>=13000?Target(n):Json.Obj("targetInfos",new object[0]),0);
+   var failure=f.Select();Check(failure==null,"official target created after 13s must remain discoverable within the cold deadline");
+   Check(timer.ElapsedMilliseconds>=13000&&timer.ElapsedMilliseconds<15500,"late target discovery timing mismatch");
+   Check(f.Peer.Methods.FindAll(m=>m=="Target.attachToTarget").Count==1,"late target attached more than once");
+   Record("cold-target-first-appears-at-13s",f,timer,failure,"empty authenticated browser target lists before creation; no target fallback");
+  }
+  if(lateOnly){Console.WriteLine(Json.Serializer().Serialize(Json.Obj("passed",true,"productStarted",false,"sourceModified",false,"cases",records)));return 0;}
+  using(var f=new Fixture(root)){
+   f.Peer.Script=(p,r,n)=>{if(n==1)return;p.Reply(r,n==2?Json.Obj("targetInfos",new object[0]):Json.Text(r,"method")=="Target.getTargets"?Target(n):Json.Obj("sessionId","read_reset_session"),n==2||n==3?2500:0);};
+   var timer=Stopwatch.StartNew();var failure=f.Select();Check(failure==null&&f.Peer.Calls==5,"healthy empty response did not restore ordinary 2s read budget");
+   Check(timer.ElapsedMilliseconds>=7300&&timer.ElapsedMilliseconds<9000,"healthy response reset timing mismatch");
+   Record("healthy-empty-response-resets-read-budget",f,timer,failure,"2s timeout, 4s fresh empty reply, then 2s timeout before fresh retry");
+  }
+  using(var f=new Fixture(root)){
+   var timer=Stopwatch.StartNew();
+   f.Peer.Script=(p,r,n)=>{if(Json.Text(r,"method")=="Target.attachToTarget")return;p.Reply(r,timer.ElapsedMilliseconds>=26000?Target(n):Json.Obj("targetInfos",new object[0]),0);};
+   var failure=f.Select();Check(failure!=null&&failure.Code==37,"late discovery must not restart the attach deadline");
+   Check(timer.ElapsedMilliseconds>=29800&&timer.ElapsedMilliseconds<31500,"late attach reset the absolute horizon");
+   Check(f.Peer.Methods.FindAll(m=>m=="Target.attachToTarget").Count==1,"late attach was retried");
+   Record("target-at-26s-attach-keeps-30s-horizon",f,timer,failure,"one mutating attach consumes only the original remaining budget");
+  }
+  using(var f=new Fixture(root)){
+   Thread changed=null;
+   f.Peer.Script=(p,r,n)=>{if(n==2){changed=new Thread(()=>{Thread.Sleep(100);f.State.Command("disable");});changed.Start();}};
+   var timer=Stopwatch.StartNew();var failure=f.Select();if(changed!=null)changed.Join();
+   Check(f.State.Disabled&&failure!=null&&f.Peer.Calls==2&&!f.Peer.Methods.Contains("Target.attachToTarget"),"disable during slow read retried or attached");
+   Check(timer.ElapsedMilliseconds>=6100&&timer.ElapsedMilliseconds<7500,"disable during adaptive read exceeded one bounded in-flight read");
+   Record("disable-during-4s-read",f,timer,failure,"no next request; existing in-flight reply wait has a 4s ceiling");
+  }
+  CandidateCase(root,"untrusted-pages-never-become-fallback",(p,r,n)=>p.Reply(r,n==1?Json.Obj("targetInfos",new object[]{Json.Obj("targetId","foreign_https","type","page","url","https://example.invalid/"),Json.Obj("targetId","foreign_blank","type","page","url","about:blank"),Json.Obj("targetId","not_page","type","service_worker","url","app://-/index.html")}):Json.Text(r,"method")=="Target.getTargets"?Target(n):Json.Obj("sessionId","trusted_only"),0),0,3,450,1500);
   CandidateCase(root,"normal-browser-first-request",(p,r,n)=>p.Reply(r,n==1?Target(1):Json.Obj("sessionId","session_1"),0),0,2,0,1000);
   CandidateCase(root,"first-discovery-reply-2400ms",(p,r,n)=>p.Reply(r,Json.Text(r,"method")=="Target.getTargets"?Target(n):Json.Obj("sessionId","session_2"),n==1?2400:n==2?700:0),0,3,2800,4200);
   CandidateCase(root,"three-empty-discoveries-then-timeout",(p,r,n)=>{if(n<=3)p.Reply(r,Json.Obj("targetInfos",new object[0]),0);else if(n>=5)p.Reply(r,Json.Text(r,"method")=="Target.getTargets"?Target(n):Json.Obj("sessionId","session_5"),0);},0,6,3600,5000);
@@ -90,10 +130,10 @@ public static class StartupTargetSelectionTests {
    Check(failure!=null&&failure.Code==37&&!f.Transport.Faulted,"first delayed reply classification");var response=f.Transport.Send("Target.getTargets",Json.Obj(),null,2000);var values=(object[])Json.Get(response,"targetInfos");Check(Json.Text(Json.Map(values[0]),"targetId")=="target_2","late id accepted for new request");Check(timer.ElapsedMilliseconds>=2600,"late reply shortcut");Check(f.Transport.FramesReceived==2&&f.Transport.MatchedResponses==1&&f.Transport.LateResponses==1,"incorrect reply counters");Record("late-old-id-during-new-discovery",f,timer,null,"only matching fresh ID accepted");
   }
   using(var f=new Fixture(root)){
-   var timer=Stopwatch.StartNew();var failure=f.Select();Check(failure!=null,"permanent silence accepted");Check(timer.ElapsedMilliseconds>=11800&&timer.ElapsedMilliseconds<13500,"shared discovery budget exceeded");Check(f.Peer.Calls>=5&&f.Peer.Calls<=6&&!f.Peer.Methods.Contains("Target.attachToTarget"),"unbounded or mutating silent discovery");Record("permanent-discovery-silence",f,timer,failure,"bounded by phase budget");
+   var timer=Stopwatch.StartNew();var failure=f.Select();Check(failure!=null,"permanent silence accepted");Check(timer.ElapsedMilliseconds>=29800&&timer.ElapsedMilliseconds<31500,"shared discovery budget exceeded");Check(f.Peer.Calls>=7&&f.Peer.Calls<=8&&!f.Peer.Methods.Contains("Target.attachToTarget"),"unbounded or mutating silent discovery");Record("permanent-discovery-silence",f,timer,failure,"all reads and waits share one 30s absolute budget");
   }
   using(var f=new Fixture(root)){
-   f.Peer.Script=(p,r,n)=>{if(n==1)p.Reply(r,Target(1),1500);};var timer=Stopwatch.StartNew();var failure=f.Select();Check(failure!=null&&failure.Code==37&&f.Peer.Calls==2,"attach replayed or not failed");Check(timer.ElapsedMilliseconds>=11800&&timer.ElapsedMilliseconds<13500,"attach did not share original phase budget");Record("permanent-attach-silence",f,timer,failure,"one attach; no budget reset");
+   f.Peer.Script=(p,r,n)=>{if(n==1)p.Reply(r,Target(1),1500);};var timer=Stopwatch.StartNew();var failure=f.Select();Check(failure!=null&&failure.Code==37&&f.Peer.Calls==2,"attach replayed or not failed");Check(timer.ElapsedMilliseconds>=13300&&timer.ElapsedMilliseconds<15000,"single attach exceeded its existing 12s cap");Record("permanent-attach-silence",f,timer,failure,"one attach; 12s request cap inside 30s phase deadline");
   }
   using(var f=new Fixture(root)){
    var changed=new Thread(()=>{Thread.Sleep(100);f.State.Command("disable");});f.Peer.Script=(p,r,n)=>{if(n==1){changed.Start();p.Reply(r,Target(1),500);}else p.Reply(r,Json.Obj("sessionId","unexpected"),0);};var timer=Stopwatch.StartNew();var failure=f.Select();changed.Join();Check(f.State.Disabled&&f.Peer.Calls==1,"disabled discovery attached target");Check(timer.ElapsedMilliseconds<1200,"disabled discovery delayed");Record("disable-before-target-reply",f,timer,failure,"no attach after disable");

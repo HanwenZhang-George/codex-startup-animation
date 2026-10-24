@@ -61,7 +61,7 @@ function Get-CodexAnalysisEvent($Event) {
     if($phase -eq 10){$age=Get-CodexAnalysisNumber $Event 'sampleAgeMs' 31536000000;if($age -lt 0 -or $age -gt 1500){return 'snapshot-unconfirmed'}}
     if($phase -ne 10 -and $code -ne 0){return $null}
     $layout=Get-CodexAnalysisNumber $Event 'layoutSupported' 1
-    $reason=Get-CodexAnalysisEnum $Event 'layoutReason' @('not-checked','root-missing','main-count','main-token','workspace-shape','shell-shape','composer-ambiguous','ready')
+    $reason=Get-CodexAnalysisEnum $Event 'layoutReason' @('not-checked','root-missing','main-count','main-token','workspace-shape','shell-shape','composer-ambiguous','frame-count','frame-token','frame-row','frame-shape','ready')
     if($layout -eq 0){if($reason -ceq 'composer-ambiguous'){return 'composer-ambiguous'};return 'layout-failed'}
     $renderer=Get-CodexAnalysisEnum $Event 'rendererCode' @('media-error','play-rejected','first-frame-timeout','reveal-timeout','resume-timeout','playback-stalled','disposed','retired','invalid-file','file-too-large','unsupported-layout')
     if((Get-CodexAnalysisNumber $Event 'videoErrorCode' 4) -ge 1 -or $renderer -ceq 'media-error'){return 'media-error'}
@@ -78,6 +78,114 @@ function Get-CodexAnalysisEvent($Event) {
     if($phase -eq 38 -and $layout -eq 1){return 'layout-only'}
     return 'snapshot-unconfirmed'
 }
+function Test-CodexHistoricalPlayback($Event) {
+    if((Get-CodexAnalysisNumber $Event 'phase' 63) -ne 39 -or (Get-CodexAnalysisNumber $Event 'code' 65535) -ne 0){return $false}
+    foreach($key in @('generationMatches','attached','mediaReady','wallpaperApplied','firstFrameConfirmed','layoutSupported','revealed','stageVisible','commitAccepted')){if((Get-CodexAnalysisNumber $Event $key 1) -ne 1){return $false}}
+    if((Get-CodexAnalysisNumber $Event 'protocolVersion' 2) -ne 2 -or (Get-CodexAnalysisEnum $Event 'health' @('fresh')) -cne 'fresh' -or (Get-CodexAnalysisNumber $Event 'disposed' 1) -ne 0 -or (Get-CodexAnalysisNumber $Event 'documentHidden' 1) -ne 0){return $false}
+    if((Get-CodexAnalysisNumber $Event 'playing' 1) -eq 1 -and (Get-CodexAnalysisEnum $Event 'actualPhase' @('visible')) -ceq 'visible'){return $true}
+    return (Get-CodexAnalysisEnum $Event 'actualPhase' @('gap')) -ceq 'gap' -and (Get-CodexAnalysisNumber $Event 'playing' 1) -eq 0 -and (Get-CodexAnalysisNumber $Event 'videoPaused' 1) -eq 1 -and (Get-CodexAnalysisNumber $Event 'presentedFrames' 2147483647 1) -gt 0
+}
+function Get-CodexStartupHistoryAnalysis($Report) {
+    # Historical observations are separate from the latest-state conclusion.
+    # A retry can coexist with an older host. Only a unique NEW host start in
+    # the click's interval can supply that click's host evidence.
+    $logs=Get-CodexAnalysisValue $Report 'logs'
+    if($logs -isnot [array] -or $logs.Count -gt 16){return}
+    $launcherLogs=@($logs|Where-Object {(Get-CodexAnalysisEnum $_ 'log' @('output/handoff-latest.log')) -ceq 'output/handoff-latest.log'})
+    if($launcherLogs.Count -ne 1){return}
+    $records=Get-CodexAnalysisValue $launcherLogs[0] 'records'
+    if($records -isnot [array] -or $records.Count -gt 512){return}
+    $launcher=[Collections.Generic.List[object]]::new();$entrySet=[Collections.Generic.HashSet[long]]::new()
+    foreach($record in $records){
+        $ticks=Get-CodexAnalysisUtc $record;if($ticks -lt 0){continue}
+        $category=Get-CodexAnalysisEnum $record 'category' @('launcher-stage','handoff-complete','launcher-cleanup-complete')
+        if($category -ceq 'unknown'){continue}
+        $stage=Get-CodexAnalysisEnum $record 'stage' @('launcher-entry','replay-target-unavailable-no-activation')
+        if($category -ceq 'launcher-stage' -and $stage -ceq 'launcher-entry'){[void]$entrySet.Add($ticks)}
+        $launcher.Add([pscustomobject]@{ticks=$ticks;category=$category;stage=$stage;record=$record})
+    }
+    $entries=@($entrySet|Sort-Object);if($entries.Count -eq 0){return}
+    $hostEvents=[Collections.Generic.List[object]]::new();$starts=[Collections.Generic.List[object]]::new();$seenStarts=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($log in $logs){
+        if((Get-CodexAnalysisEnum $log 'log' @('output/wallpaper-readiness.log','output/wallpaper-readiness.log.1')) -ceq 'unknown'){continue}
+        $items=Get-CodexAnalysisValue $log 'records';if($items -isnot [array] -or $items.Count -gt 512){return}
+        foreach($record in $items){
+            $ticks=Get-CodexAnalysisUtc $record;if($ticks -lt 0 -or (Get-CodexAnalysisEnum $record 'category' @('host-phase')) -cne 'host-phase'){continue}
+            $phase=Get-CodexAnalysisNumber $record 'phase' 63;$code=Get-CodexAnalysisNumber $record 'code' 65535;$run=Get-CodexAnalysisNumber $record 'hostRunOrdinal' 32 1
+            $item=[pscustomobject]@{ticks=$ticks;phase=$phase;code=$code;run=$run;record=$record};$hostEvents.Add($item)
+            if($phase -eq 20 -and $code -eq 0 -and $seenStarts.Add(($ticks.ToString()+'|'+$run.ToString()))){$starts.Add($item)}
+        }
+    }
+    $lines=[Collections.Generic.List[string]]::new();$first=[Math]::Max(0,$entries.Count-8)
+    if($first -gt 0){$lines.Add(('保留日志有 {0} 次启动入口；以下只摘要最近 8 次，较早记录仍在报告中。' -f $entries.Count))}
+    $lines.Add('启动历史按入口时间与新宿主边界关联；未记录启动关联号的部分只是时间关联，不能把旧宿主的持续播放当成后一次点击成功。')
+    for($index=$first;$index -lt $entries.Count;$index++){
+        $begin=$entries[$index];$end=if($index+1 -lt $entries.Count){$entries[$index+1]}else{[long]::MaxValue}
+        $local=@($launcher|Where-Object {$_.ticks -ge $begin -and $_.ticks -lt $end})
+        $replay=@($local|Where-Object {$_.stage -ceq 'replay-target-unavailable-no-activation'}).Count -gt 0
+        $complete=@($local|Where-Object {$_.category -ceq 'handoff-complete' -and (Get-CodexAnalysisNumber $_.record 'success' 1) -eq 1})
+        $newHosts=@($starts|Where-Object {$_.ticks -ge $begin -and $_.ticks -lt $end})
+        $label=('启动尝试 {0}（UTC {1}）' -f ($index+1),([DateTime]::new($begin,[DateTimeKind]::Utc)).ToString('HH:mm:ss.fff',[Globalization.CultureInfo]::InvariantCulture))
+        $parts=[Collections.Generic.List[string]]::new()
+        if($replay){$parts.Add('重播未找到合格窗口；本次未建立新的壁纸接入')}
+        elseif($complete.Count -gt 0){$parts.Add(('完成交接，入口至交接 {0} 毫秒' -f [long](($complete[0].ticks-$begin)/[TimeSpan]::TicksPerMillisecond)))}
+        else{$parts.Add('未保留成功交接记录')}
+        if($newHosts.Count -gt 1){$parts.Add('出现多个新宿主，无法唯一归属');$lines.Add($label+'：'+($parts -join '；')+'。');continue}
+        if($newHosts.Count -eq 0){$parts.Add('没有本次新宿主起点；旧宿主记录不并入本次');$lines.Add($label+'：'+($parts -join '；')+'。');continue}
+        $start=$newHosts[0];$next=@($starts|Where-Object {$_.ticks -gt $start.ticks}|Sort-Object ticks|Select-Object -First 1)
+        if($start.run -gt 0 -and @($starts|Where-Object {$_.run -eq $start.run}).Count -ne 1){$parts.Add('同一宿主编号有多个起点，无法唯一归属');$lines.Add($label+'：'+($parts -join '；')+'。');continue}
+        $hostEnd=if($next.Count -eq 1){$next[0].ticks}else{[long]::MaxValue}
+        $scope=@($hostEvents|Where-Object {$_.ticks -ge $start.ticks -and $(if($start.run -gt 0){$_.run -eq $start.run}else{$_.ticks -lt $hostEnd})}|Sort-Object ticks)
+        $failure=@($scope|Where-Object {(($_.phase -ge 1 -and $_.phase -le 13) -or $_.phase -eq 15) -and (($_.code -ge 100 -and $_.code -le 199) -or ($_.code -ge 61100 -and $_.code -le 65099))}|Sort-Object ticks,phase|Select-Object -First 1)
+        if($failure.Count -eq 1){
+            $f=$failure[0];$detail='宿主报告错误'
+            if($f.phase -eq 1 -and $f.code -eq 137){$detail='目标页面发现等待 CDP 回复超时'}
+            elseif($f.code -eq 172){$detail='目标或通信会话失效，不能仅凭错误码判断退出原因'}
+            $failureCodes=@($scope|Where-Object {$_.ticks -eq $f.ticks -and (($_.phase -ge 1 -and $_.phase -le 13) -or $_.phase -eq 15) -and $_.code -ge 100}|ForEach-Object {$_.code}|Select-Object -Unique)
+            if($failureCodes.Count -eq 1){$parts.Add(('{0}（阶段 {1}，码 {2}）' -f $detail,$f.phase,$f.code))}else{$parts.Add('首次故障同一时刻存在不同错误码，未选其中一条推定原因')}
+        }
+        $proved=$false
+        foreach($sample in ($scope|Where-Object {$_.phase -eq 39})){
+            if(-not (Test-CodexHistoricalPlayback $sample.record)){continue}
+            $peers=@($scope|Where-Object {$_.phase -eq 39 -and $_.ticks -eq $sample.ticks})
+            if(@($peers|Where-Object {-not (Test-CodexHistoricalPlayback $_.record)}).Count -eq 0){$proved=$true;break}
+        }
+        if($proved){$parts.Add('历史快照确认过壁纸显示；不代表结束时仍播放')}
+        $losses=@($scope|Where-Object {$_.phase -eq 46 -and $_.code -eq 0}|Sort-Object ticks -Descending)
+        if($losses.Count -gt 0){
+            $loss=$losses[0];$kinds=@($losses|Sort-Object ticks|ForEach-Object {Get-CodexAnalysisEnum $_.record 'lossKind' @('transport-fault','target-detached','target-crashed','inspector-detached','unknown')}|Select-Object -Unique)
+            $names=@{'transport-fault'='通信管道故障';'target-detached'='目标会话分离';'target-crashed'='渲染目标崩溃通知';'inspector-detached'='调试会话分离';'unknown'='未分类会话丢失'}
+            $parts.Add('本宿主结束线索（均保留）：'+(($kinds|ForEach-Object {$names[$_]}) -join '、'))
+            $processStates=@($losses|Where-Object {$_.ticks -eq $loss.ticks}|ForEach-Object {Get-CodexAnalysisNumber $_.record 'processExited' 1}|Select-Object -Unique)
+            $processState='未知或冲突';if($processStates.Count -eq 1){if($processStates[0] -eq 0){$processState='仍存活'}elseif($processStates[0] -eq 1){$processState='已退出'}}
+            $parts.Add('最后丢失记录采样时进程：'+$processState)
+            $exits=@($scope|Where-Object {$_.phase -eq 47 -and $_.code -eq 0 -and $_.ticks -ge $loss.ticks -and (Get-CodexAnalysisNumber $_.record 'processExited' 1) -eq 1}|Sort-Object ticks|Select-Object -First 1)
+            $exitConfirmed=$exits.Count -eq 1
+            if($exitConfirmed){$exitConfirmed=@($scope|Where-Object {$_.phase -eq 47 -and $_.ticks -eq $exits[0].ticks -and ($_.code -ne 0 -or (Get-CodexAnalysisNumber $_.record 'processExited' 1) -ne 1)}).Count -eq 0}
+            if($exitConfirmed){
+                $codes=@($scope|Where-Object {$_.phase -eq 47 -and $_.ticks -eq $exits[0].ticks}|ForEach-Object {if((Get-CodexAnalysisNumber $_.record 'exitCodeKnown' 1) -eq 1){Get-CodexAnalysisNumber $_.record 'processExitCode' 4294967295}else{-1L}}|Select-Object -Unique)
+                $exitText=if($codes.Count -eq 1 -and $codes[0] -ge 0){$codes[0].ToString([Globalization.CultureInfo]::InvariantCulture)}else{'未知或冲突'}
+                $parts.Add(('丢失记录与进程退出记录相隔 {0} 毫秒；退出码 {1}；即使退出码为 0，也不能据此判断用户主动退出' -f [long](($exits[0].ticks-$loss.ticks)/[TimeSpan]::TicksPerMillisecond),$exitText))
+            }
+            else{$parts.Add('没有可关联的明确进程退出记录；不能据此判断用户主动退出')}
+        }elseif(@($scope|Where-Object {$_.code -eq 172}).Count -gt 0){$parts.Add('旧记录未细分目标丢失与进程退出；不能据此判断用户主动退出')}
+        $visibility=@($scope|Where-Object {$_.phase -eq 49 -and $_.code -ge 1 -and $_.code -le 8}|Sort-Object ticks -Descending|Select-Object -First 1)
+        if($visibility.Count -eq 1 -and @($scope|Where-Object {$_.phase -eq 49 -and $_.ticks -eq $visibility[0].ticks -and $_.code -ne $visibility[0].code}).Count -eq 0){
+            $complete=@($scope|Where-Object {$_.phase -eq 49 -and $_.ticks -eq $visibility[0].ticks}|ForEach-Object {Get-CodexAnalysisNumber $_.record 'observationComplete' 1}|Select-Object -Unique)
+            switch($visibility[0].code){
+                6{$parts.Add('曾排队释放初始隐藏窗口；排队不等于显示已确认')}
+                3{$parts.Add('初始隐藏主窗口候选不唯一，未扩大显示权限')}
+                7{
+                    if($complete.Count -eq 1 -and $complete[0] -eq 0){$parts.Add('窗口枚举未完整完成，候选计数可能不完整；不能据此确定窗口状态')}
+                    elseif($complete.Count -eq 1 -and $complete[0] -eq 1){$parts.Add('初始隐藏窗口候选的所有权或状态校验未通过；不能据此认定原先存在已保留的窗口')}
+                    else{$parts.Add('无法区分保留窗口候选失效与窗口观察不完整；未据此扩大显示权限')}
+                }
+            }
+        }
+        $lines.Add($label+'：'+($parts -join '；')+'。')
+    }
+    return $lines.ToArray()
+}
 function Get-CodexCompletedStartupAnalysis($Report) {
     # Only a single bounded handoff stream can supply the historical interval.
     # Without correlation IDs, overlapping entries are deliberately not paired.
@@ -86,7 +194,7 @@ function Get-CodexCompletedStartupAnalysis($Report) {
     $handoff=@($logs|Where-Object {(Get-CodexAnalysisEnum $_ 'log' @('output/handoff-latest.log')) -ceq 'output/handoff-latest.log'})
     if($handoff.Count -ne 1){return}
     $records=Get-CodexAnalysisValue $handoff[0] 'records'
-    if($records -isnot [array] -or $records.Count -gt 128){return}
+    if($records -isnot [array] -or $records.Count -gt 512){return}
     $ordered=[Collections.Generic.List[object]]::new()
     foreach($record in $records){
         $category=Get-CodexAnalysisEnum $record 'category' @('launcher-stage','handoff-complete','startup-resource-sample')
@@ -145,7 +253,7 @@ function Get-CodexResourceProtectionAnalysis($Report) {
     $handoff=@($logs|Where-Object {(Get-CodexAnalysisEnum $_ 'log' @('output/handoff-latest.log')) -ceq 'output/handoff-latest.log'})
     if($handoff.Count -ne 1){return}
     $records=Get-CodexAnalysisValue $handoff[0] 'records'
-    if($records -isnot [array] -or $records.Count -gt 128){return}
+    if($records -isnot [array] -or $records.Count -gt 512){return}
     $events=[Collections.Generic.List[object]]::new();$entryTimes=[Collections.Generic.HashSet[long]]::new();$latest=-1L;$protection=-1L
     foreach($record in $records){
         $ticks=Get-CodexAnalysisUtc $record;if($ticks -lt 0){continue}
@@ -167,7 +275,7 @@ function Get-CodexResourceProtectionAnalysis($Report) {
     $cancelled=$false
     foreach($log in $logs){
         if((Get-CodexAnalysisEnum $log 'log' @('output/wallpaper-readiness.log','output/wallpaper-readiness.log.1')) -ceq 'unknown'){continue}
-        $hostRecords=Get-CodexAnalysisValue $log 'records';if($hostRecords -isnot [array] -or $hostRecords.Count -gt 128){continue}
+        $hostRecords=Get-CodexAnalysisValue $log 'records';if($hostRecords -isnot [array] -or $hostRecords.Count -gt 512){continue}
         foreach($record in $hostRecords){
             $ticks=Get-CodexAnalysisUtc $record;if($ticks -lt $start -or $ticks -gt $latest -or (Get-CodexAnalysisEnum $record 'category' @('host-phase')) -cne 'host-phase'){continue}
             $phase=Get-CodexAnalysisNumber $record 'phase' 63
@@ -233,7 +341,7 @@ function Get-CodexOfficialAdaptationAnalysis($Report) {
     foreach($log in $logs){
         $name=Get-CodexAnalysisEnum $log 'log' @('output/wallpaper-readiness.log.1','output/wallpaper-readiness.log','output/handoff-latest.log')
         $records=Get-CodexAnalysisValue $log 'records'
-        if($name -ceq 'unknown' -or $records -isnot [array] -or $records.Count -gt 128){continue}
+        if($name -ceq 'unknown' -or $records -isnot [array] -or $records.Count -gt 512){continue}
         foreach($record in $records){
             $ticks=Get-CodexAnalysisUtc $record;if($ticks -lt 0){continue}
             $category=Get-CodexAnalysisEnum $record 'category' @('host-phase','launcher-stage')
@@ -255,19 +363,131 @@ function Get-CodexOfficialAdaptationAnalysis($Report) {
     }
     return $lines.ToArray()
 }
+function Get-CodexPublicEntryEvidence($Report) {
+    $result=[ordered]@{suppressPlaybackProof=$false;lines=@()}
+    $logs=Get-CodexAnalysisValue $Report 'logs'
+    if($logs -isnot [array] -or $logs.Count -gt 16){return [pscustomobject]$result}
+    $sources=[Collections.Generic.List[object]]::new();$cutoff=-1L
+    foreach($log in $logs){
+        $name=Get-CodexAnalysisEnum $log 'log' @('diagnostics/portable-launch.log','output/handoff-latest.log','output/wallpaper-readiness.log','output/wallpaper-readiness.log.1')
+        $records=Get-CodexAnalysisValue $log 'records'
+        if($records -isnot [array] -or $records.Count -gt 512){continue}
+        if($name -ceq 'diagnostics/portable-launch.log'){$sources.Add($log);continue}
+        foreach($entry in $records){
+            $ticks=Get-CodexAnalysisUtc $entry;if($ticks -lt 0){continue}
+            $category=Get-CodexAnalysisEnum $entry 'category' @('launcher-stage','host-phase')
+            if(($name -ceq 'output/handoff-latest.log' -and $category -ceq 'launcher-stage' -and (Get-CodexAnalysisEnum $entry 'stage' @('launcher-entry')) -ceq 'launcher-entry') -or
+                ($name -cin @('output/wallpaper-readiness.log','output/wallpaper-readiness.log.1') -and $category -ceq 'host-phase' -and (Get-CodexAnalysisNumber $entry 'phase' 63) -eq 20)){$cutoff=[Math]::Max($cutoff,$ticks)}
+        }
+    }
+    $codes=@('PUBLIC_ENTRY_BUSY','PUBLIC_CHILD_EXIT','PUBLIC_PREPARATION_TIMEOUT','PUBLIC_LAUNCH_FAILED','PUBLIC_CHILD_TIMEOUT','PUBLIC_COMPONENT_OR_SIGNATURE_REJECTED','PUBLIC_PREPARATION_FAILED','PUBLIC_UNSUPPORTED_WINDOWS','PUBLIC_CODE_INTEGRITY_FAILED','PUBLIC_MEDIA_INCOMPLETE','PUBLIC_LAUNCHER_CONFIG_INVALID','PUBLIC_LAUNCHER_ASSET_INVALID','PUBLIC_OFFICIAL_CODEX_NOT_INSTALLED','PUBLIC_PACKAGE_ENUMERATION_FAILED','PUBLIC_SUPPORTED_CODEX_EXECUTABLE_NOT_FOUND','PUBLIC_OFFICIAL_DISCOVERY_FAILED','PUBLIC_OFFICIAL_IDENTITY_REJECTED','PUBLIC_OFFICIAL_RUNTIME_UNSUPPORTED')
+    $latest=-1L;$untimed=$false;$failures=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$neutralTimes=[Collections.Generic.HashSet[long]]::new()
+    foreach($source in $sources){foreach($entry in (Get-CodexAnalysisValue $source 'records')){
+        if((Get-CodexAnalysisEnum $entry 'category' @('public-entry')) -cne 'public-entry'){continue}
+        $code=Get-CodexAnalysisEnum $entry 'publicCode' $codes
+        if($code -ceq 'unknown'){continue}
+        $neutral=$code -ceq 'PUBLIC_ENTRY_BUSY';$signature=$code
+        if($code -ceq 'PUBLIC_CHILD_EXIT'){
+            $exitCode=Get-CodexAnalysisValue $entry 'exitCode'
+            if(($exitCode -isnot [int] -and $exitCode -isnot [long]) -or $exitCode -lt -2147483648L -or $exitCode -gt 2147483647L){continue}
+            $neutral=$exitCode -eq 0;$signature+=' exitCode='+([long]$exitCode).ToString([Globalization.CultureInfo]::InvariantCulture)
+        }
+        $ticks=Get-CodexAnalysisUtc $entry
+        # Busy and a zero child exit are neither failure nor playback proof.
+        # They cannot clear an earlier failure; only an observed newer
+        # launcher/host entry starts a different analysis interval. Such an
+        # entry still does not prove Codex startup or wallpaper playback.
+        if($neutral){if($ticks -ge 0){[void]$neutralTimes.Add($ticks)};continue}
+        if($ticks -lt 0){$untimed=$true;continue}
+        if($ticks -lt $cutoff){continue}
+        if($ticks -gt $latest){$latest=$ticks;$failures.Clear()}
+        if($ticks -eq $latest){[void]$failures.Add($signature)}
+    }}
+    if($latest -lt 0 -and -not $untimed){return [pscustomobject]$result}
+    $result.suppressPlaybackProof=$true
+    if($untimed -or $sources.Count -ne 1 -or $failures.Count -ne 1 -or $latest -eq $cutoff -or $neutralTimes.Contains($latest)){
+        $result.lines=@('公开入口记录的先后关系无法确认：存在无效时间、同一时刻不同结果、与启动边界同一时间或重复日志来源。未选择某条记录认定本次成功或失败；旧播放记录不能证明这次入口操作成功。')
+    }else{
+        foreach($failure in $failures){$result.lines=@(('公开入口操作异常：{0}。该日志没有运行模式标记，可能来自启动、预览或校验；不能据此认定当前客户端或壁纸已经关闭。' -f $failure),'既有壁纸的播放记录不能证明这次公开入口操作成功；请结合本报告的固定错误码和文件校验结果分析。')}
+    }
+    return [pscustomobject]$result
+}
+function Get-CodexDetailedEvidenceAnalysis($Report) {
+    $lines=[Collections.Generic.List[string]]::new()
+    $environment=Get-CodexAnalysisValue $Report 'environment'
+    if((Get-CodexAnalysisEnum $environment 'kind' @('CodexEnvironmentEvidence')) -ceq 'CodexEnvironmentEvidence'){
+        $cores=Get-CodexAnalysisNumber $environment 'logicalProcessors' 4096 1
+        $memory=Get-CodexAnalysisValue $environment 'memory';$display=Get-CodexAnalysisValue $environment 'display'
+        $available=Get-CodexAnalysisNumber $memory 'availablePhysicalBytes' 281474976710656
+        $monitors=Get-CodexAnalysisNumber $display 'monitorCount' 128 1
+        $scale=Get-CodexAnalysisNumber $display 'primaryScalePercent' 500 1
+        $lines.Add(('采集时环境：逻辑处理器 {0}；可用物理内存 {1} 字节；显示器 {2}；主屏缩放 {3}%。-1 表示无法确认；这些不是故障发生时的采样。' -f $cores,$available,$monitors,$scale))
+        $lines.Add('环境中的 GPU 信息仅为已注册驱动厂商、版本和日期，不能证明实际使用了哪块显卡或硬件解码。')
+    }
+    $logs=Get-CodexAnalysisValue $Report 'logs'
+    if($logs -isnot [array] -or $logs.Count -gt 16){return $lines.ToArray()}
+    $items=[Collections.Generic.List[object]]::new();$cutoff=-1L;$truncated=$false
+    foreach($log in $logs){
+        foreach($field in @('tailTruncated','recordLimitReached')){$value=Get-CodexAnalysisValue $log $field;if($value -is [bool] -and $value){$truncated=$true}}
+        $name=Get-CodexAnalysisEnum $log 'log' @('output/wallpaper-readiness.log.1','output/wallpaper-readiness.log','output/handoff-latest.log')
+        $records=Get-CodexAnalysisValue $log 'records'
+        if($name -ceq 'unknown' -or $records -isnot [array] -or $records.Count -gt 512){continue}
+        foreach($record in $records){
+            $ticks=Get-CodexAnalysisUtc $record;if($ticks -lt 0){continue}
+            $category=Get-CodexAnalysisEnum $record 'category' @('launcher-stage','host-phase','native-geometry','replay-native-candidates')
+            if($name -ceq 'output/handoff-latest.log'){
+                if($category -ceq 'launcher-stage' -and (Get-CodexAnalysisEnum $record 'stage' @('launcher-entry')) -ceq 'launcher-entry'){$cutoff=[Math]::Max($cutoff,$ticks)}
+                if($category -cin @('native-geometry','replay-native-candidates')){$items.Add([pscustomobject]@{ticks=$ticks;kind=$category;data=$record})}
+            }elseif($category -ceq 'host-phase'){
+                $phase=Get-CodexAnalysisNumber $record 'phase' 63
+                if($phase -eq 20){$cutoff=[Math]::Max($cutoff,$ticks)}
+                if($phase -eq 45 -and (Get-CodexAnalysisNumber $record 'code' 65535) -eq 0){$items.Add([pscustomobject]@{ticks=$ticks;kind='shape';data=$record})}
+            }
+        }
+    }
+    foreach($kind in @('shape','native-geometry','replay-native-candidates')){
+        $matching=@($items|Where-Object {$_.kind -ceq $kind -and $_.ticks -ge $cutoff}|Sort-Object ticks -Descending)
+        if($matching.Count -eq 0){continue}
+        # Never resolve conflicting observations by whichever log was enumerated last.
+        $latest=@($matching|Where-Object {$_.ticks -eq $matching[0].ticks})
+        $keys=if($kind -ceq 'shape'){@('layoutAuditFrameCount','layoutAuditActiveFrameCount','layoutAuditActiveAnyMainCount','layoutAuditDirectRowCount','layoutAuditDecorationCount','layoutAuditDecorationValid','layoutAuditComposerCount','layoutAuditComposerAmbiguous')}elseif($kind -ceq 'native-geometry'){@('targetDpi','coverDpi','deltaLeft','deltaTop','deltaRight','deltaBottom')}else{@('verifiedWindows','visible','hidden','eligible','ownedRejected','childRejected','toolRejected','cloakedRejected','rectUnavailable','sizeRejected','stateChanged')}
+        $signatures=[Collections.Generic.HashSet[string]]::new();$values=@()
+        foreach($item in $latest){
+            $values=@();foreach($key in $keys){$max=if($kind -ceq 'shape'){129}elseif($kind -ceq 'native-geometry'){65536}else{99999};$min=if($kind -ceq 'native-geometry'){-2147483648L}else{-1L};$values+=Get-CodexAnalysisNumber $item.data $key $max $min}
+            $signature=$values -join ','
+            if($kind -ceq 'shape'){
+                foreach($key in @('layoutAuditAnyMainCount','layoutAuditPageSurfaceFrameCount')){$signature+=','+(Get-CodexAnalysisNumber $item.data $key 129 -1)}
+                foreach($key in @('layoutAuditLayoutTokenValid','layoutAuditPageLayoutTokenValid','layoutAuditFrameHashMatches','layoutAuditPageSurfaceFlag')){$signature+=','+(Get-CodexAnalysisNumber $item.data $key 1 -1)}
+                $signature+=','+(Get-CodexAnalysisEnum $item.data 'layoutReason' @('not-checked','root-missing','main-count','main-token','workspace-shape','shell-shape','composer-ambiguous','frame-count','frame-token','frame-row','frame-shape','ready'))
+                $signature+=','+(Get-CodexAnalysisEnum $item.data 'layoutSurfaceKind' @('none','main','frame'))
+            }
+            [void]$signatures.Add($signature)
+        }
+        if($signatures.Count -ne 1){$lines.Add('最新细项证据同一时刻存在差异，未据此推断成功或失败；数值记录已保留供核查。');continue}
+        if($kind -ceq 'shape'){$lines.Add(('最近保留的页面结构计数：frame={0}，活动 frame={1}，活动任意 main={2}，直接工作区行={3}，背景装饰={4}，装饰验证={5}，输入区={6}，输入区歧义={7}。-1 表示未确认；结构记录不是播放证明。' -f $values))}
+        elseif($kind -ceq 'native-geometry'){$lines.Add(('最近保留的窗口证据：目标 DPI={0}，动画 DPI={1}；目标相对动画的左/上/右/下边差={2}/{3}/{4}/{5} 像素。-2147483648 表示边差不可用；边差包含设计留白，不能直接判定错位。' -f $values))}
+        else{$lines.Add(('最近保留的窗口筛选：已验证={0}，可见={1}，隐藏={2}，合格={3}；排除计数（owner/child/tool/cloak/rect/size/stateChanged）={4}/{5}/{6}/{7}/{8}/{9}/{10}。-1 为未确认；此处不输出窗口标题或句柄。' -f $values))}
+    }
+    if($truncated){$lines.Add('部分日志尾部或记录数量达到采集上限，报告不是完整运行历史；请在复现后尽快收集，避免更早记录被轮换。')}
+    return $lines.ToArray()
+}
 function Get-CodexDiagnosticAnalysis($Report,$FileCheck) {
     $lines=[Collections.Generic.List[string]]::new()
     $lines.Add('Codex 启动器与壁纸：本地诊断说明')
     $lines.Add('本说明依据文件检查和有限长度的既有日志生成；不是实时运行探测。旧记录不等于当前故障。')
     if((Get-CodexAnalysisEnum $Report 'manifestState' @('valid','invalid-or-missing')) -ceq 'invalid-or-missing'){$lines.Add('发布清单缺失或无效，本次仅生成有限诊断；没有验证全部文件。这不等于应用运行失败，请先确认已经完整解压。')}
-    $checkState=Get-CodexAnalysisEnum $FileCheck 'state' @('not-run','same-manifest')
+    $checkState=Get-CodexAnalysisEnum $FileCheck 'state' @('not-run','same-manifest','current-attempt')
     $failure=Get-CodexAnalysisEnum $FileCheck 'failure' @('unknown','none','platform-check','manifest-check','file-integrity','framework-metadata')
     $passed=Get-CodexAnalysisValue $FileCheck 'passed';$count=Get-CodexAnalysisNumber $FileCheck 'fileCount' 300 1
-    if($checkState -ceq 'same-manifest' -and $passed -is [bool] -and $passed -and $failure -ceq 'none' -and $count -ge 1){
+    if($checkState -cin @('same-manifest','current-attempt') -and $passed -is [bool] -and $passed -and $failure -ceq 'none' -and $count -ge 1){
         $lines.Add(('文件校验记录：{0} 项通过。它只证明所检文件匹配清单，不证明解码成功、画面流畅或兼容性正常。' -f $count))
     }elseif($passed -is [bool] -and -not $passed -and $failure -cne 'none' -and $failure -cne 'unknown'){
         $messages=@{'platform-check'='文件校验未通过系统或依赖检查。';'manifest-check'='发布清单无法验证。';'file-integrity'='文件完整性校验失败；请从原发布页重新下载并完整解压到新目录，不要覆盖当前正在运行的目录。';'framework-metadata'='程序框架元数据检查失败。'}
         $lines.Add($messages[$failure])
+        $fileIndex=Get-CodexAnalysisNumber $FileCheck 'failedFileIndex' 299
+        $fileRole=Get-CodexAnalysisEnum $FileCheck 'failedFileRole' @('none','launcher','startup','wallpaper-host','wallpaper-controls','renderer','launcher-config','startup-media','intro-media','idle-media','finale-media','ambient-media','particles-media','diagnostics','installer','documentation','source','other')
+        $failureKind=Get-CodexAnalysisEnum $FileCheck 'failureKind' @('none','missing','size-mismatch','hash-mismatch','unsafe-path','read-error','manifest-invalid','platform-incompatible','framework-metadata','unknown')
+        if($fileIndex -ge 0){$lines.Add(('失败清单索引（从 0 开始）={0}，组件={1}，类型={2}。该索引对应本包清单，未导出文件路径。' -f $fileIndex,$fileRole,$failureKind))}
     }else{$lines.Add('没有可确认的完整文件校验记录；素材存在或大小相同不代表哈希、解码已经验证。')}
     $roles=[ordered]@{startup='完整启动视频';intro='入场视频';idle='启动等待视频';finale='流泪转场视频';ambient='常态壁纸视频';particles='粒子壁纸视频'}
     $media=Get-CodexAnalysisValue $Report 'mediaPresence';$mediaCount=0;$mediaIssues=0
@@ -300,7 +520,7 @@ function Get-CodexDiagnosticAnalysis($Report,$FileCheck) {
     if($logs -is [array] -and $logs.Count -le 16){foreach($log in $logs){
         $name=Get-CodexAnalysisEnum $log 'log' @('output/wallpaper-readiness.log.1','output/wallpaper-readiness.log','output/handoff-latest.log')
         if($name -ceq 'unknown'){continue};$records=Get-CodexAnalysisValue $log 'records'
-        if($records -isnot [array] -or $records.Count -gt 128){continue}
+        if($records -isnot [array] -or $records.Count -gt 512){continue}
         foreach($entry in $records){
             $ticks=Get-CodexAnalysisUtc $entry;if($ticks -lt 0){continue}
             $cat=Get-CodexAnalysisEnum $entry 'category' @('host-phase','bridge-diagnostic','launcher-stage')
@@ -346,11 +566,16 @@ function Get-CodexDiagnosticAnalysis($Report,$FileCheck) {
         'layout-only'='最新有效记录：页面布局通过检查，但尚不能证明视频已播放。'
         'snapshot-unconfirmed'='没有可解释的本次播放证明：最新状态字段不完整、相互矛盾或属于过期快照，不能继续采用更早的播放成功记录。'
     }
+    $entryEvidence=Get-CodexPublicEntryEvidence $Report
     if($meanings.Count -gt 1){$lines.Add('同一最新时间出现相互不同的状态记录，不能选其中一条断言成功或失败。')}
+    elseif($state -ceq 'observed-playing' -and $entryEvidence.suppressPlaybackProof){$lines.Add('存在尚未排除的公开入口异常记录，未将既有壁纸的播放状态作为这次入口操作成功的证明。')}
     elseif($messages.ContainsKey($state)){$lines.Add($messages[$state])}
     else{$lines.Add('没有可解释的本次运行状态记录；日志缺失、过期快照或未知字段均不能证明运行成功或失败。')}
+    foreach($line in $entryEvidence.lines){$lines.Add($line)}
+    foreach($line in (Get-CodexStartupHistoryAnalysis $Report)){$lines.Add($line)}
     foreach($line in (Get-CodexCompletedStartupAnalysis $Report)){$lines.Add($line)}
     foreach($line in (Get-CodexResourceProtectionAnalysis $Report)){$lines.Add($line)}
+    foreach($line in (Get-CodexDetailedEvidenceAnalysis $Report)){$lines.Add($line)}
     $lines.Add('这里没有执行显卡、驱动或解码压力测试。累计帧数和丢帧数不是实时 FPS，也不能单独证明卡顿程度。')
     $lines.Add('若画面仍有问题，请发送同目录的 latest-report.zip，并说明是否看到启动动画、流泪转场和壁纸。无需上传原始日志、账号配置或整个运行目录。')
     $lines.Add('诊断不会启动或关闭应用，不会下载依赖，不需要反复重启或长时间等待。')

@@ -26,7 +26,10 @@ internal sealed class CdpTransport {
     sealed class Pending { internal readonly ManualResetEventSlim Done=new ManualResetEventSlim(false,0);internal object Result;internal int Error;internal string Session; }
     readonly OwnedClient client;readonly bool isolated;readonly object gate=new object(),writeGate=new object();
     readonly Dictionary<int,Pending> pending=new Dictionary<int,Pending>();int nextId;int fault;volatile bool ended;
-    long bytesReceived,framesReceived,matchedResponses,lateResponses;
+    long bytesReceived,framesReceived,matchedResponses,lateResponses;int targetLossKind;
+    internal int FaultCode {get{return Interlocked.CompareExchange(ref fault,0,0);}}
+    internal int TargetLossKind {get{return Interlocked.CompareExchange(ref targetLossKind,0,0);}}
+    internal int ProcessExitState {get{try{return client==null?-1:client.ProcessExitState;}catch{return -1;}}}
     internal long BytesReceived {get{return Interlocked.Read(ref bytesReceived);}}
     internal long FramesReceived {get{return Interlocked.Read(ref framesReceived);}}
     internal long MatchedResponses {get{return Interlocked.Read(ref matchedResponses);}}
@@ -43,8 +46,8 @@ internal sealed class CdpTransport {
             object idObject=Json.Get(m,"id");if(!(idObject is int)){
                 string method=Json.Text(m,"method"),eventSession=Json.Text(m,"sessionId");var parameters=Json.Get(m,"params") as Dictionary<string,object>;
                 if(parameters!=null&&method=="Runtime.bindingCalled"&&Json.Text(parameters,"name")=="__codexDragonNotifyV2"&&Json.Text(parameters,"payload")=="state")Notify("renderer-state",eventSession);
-                else if(parameters!=null&&method=="Target.detachedFromTarget")Notify("target-lost",Json.Text(parameters,"sessionId"));
-                else if(method=="Inspector.targetCrashed"||method=="Inspector.detached")Notify("target-lost",eventSession);
+                else if(parameters!=null&&method=="Target.detachedFromTarget"){Interlocked.Exchange(ref targetLossKind,1);Notify("target-lost",Json.Text(parameters,"sessionId"));}
+                else if(method=="Inspector.targetCrashed"||method=="Inspector.detached"){Interlocked.Exchange(ref targetLossKind,method=="Inspector.targetCrashed"?2:3);Notify("target-lost",eventSession);}
                 return;
             }int id=(int)idObject;Pending request;
             lock(gate){if(!pending.TryGetValue(id,out request)){Interlocked.Increment(ref lateResponses);return;}

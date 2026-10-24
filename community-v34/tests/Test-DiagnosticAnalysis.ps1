@@ -112,7 +112,7 @@ $invalid=StartupEntry '2026-10-22T12:27:31+00:00'
 Check (-not (Get-CodexDiagnosticAnalysis (Report @() @($invalid,$complete[-1])) $null).Contains('最近一次有结束记录的启动：')) 'noncanonical UTC boundary cannot prove complete interval'
 $r=Report @() $complete;$r.logs+= $r.logs[1]
 Check (-not (Get-CodexDiagnosticAnalysis $r $null).Contains('最近一次有结束记录的启动：')) 'duplicate handoff log sources cannot prove resource interval'
-$r=Report @() $complete;$r.logs[1].records=@(1..129|ForEach-Object {$complete[0]})
+$r=Report @() $complete;$r.logs[1].records=@(1..513|ForEach-Object {$complete[0]})
 Check (-not (Get-CodexDiagnosticAnalysis $r $null).Contains('最近一次有结束记录的启动：')) 'resource analysis obeys record count cap'
 $overlap=StartupEntry '2026-10-22T12:27:40Z'
 Check (-not (Get-CodexDiagnosticAnalysis (Report @() ($complete+@($overlap))) $null).Contains('最近一次有结束记录的启动：')) 'overlapping startup entries cannot be paired speculatively'
@@ -204,6 +204,87 @@ $pressureSnapshot.health='stale'
 Check (-not (Get-CodexDiagnosticAnalysis (Report @($pressureSnapshot)) $null).Contains('最新快照仍处于内存保护暂停')) 'stale pressure snapshot cannot prove current suspension'
 $pressureSnapshot.health='fresh';$pressureSnapshot.disposed=1
 Check ((Get-CodexDiagnosticAnalysis (Report @($pressureSnapshot)) $null).Contains('壁纸渲染已结束')) 'terminal disposed state overrides pressure flag'
+# Public entry can fail before the child emits a launcher-entry boundary.
+# These logs do not identify --check / --configure / --preview vs normal start.
+function PublicEntry([string]$Time,[string]$Code,$ExitCode=76) {
+    $value=[pscustomobject]@{utc=$Time;category='public-entry';publicCode=$Code}
+    if($Code -ceq 'PUBLIC_CHILD_EXIT'){$value|Add-Member -NotePropertyName exitCode -NotePropertyValue $ExitCode}
+    return $value
+}
+function WithPublic($Report,$Entries) {
+    $Report.logs+= [pscustomobject]@{log='diagnostics/portable-launch.log';records=@($Entries)}
+    return $Report
+}
+$entryOldPlaying=Event '2026-10-24T10:00:00Z' 'success'
+$entryFailure=PublicEntry '2026-10-24T11:00:00Z' 'PUBLIC_CODE_INTEGRITY_FAILED'
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @($entryFailure)) $null
+Check ($text.Contains('公开入口操作异常') -and $text.Contains('PUBLIC_CODE_INTEGRITY_FAILED') -and -not $text.Contains('当时确认了首帧')) 'public preparation failure before launcher boundary cannot hide behind old playback proof'
+Check ($text.Contains('启动、预览或校验') -and $text.Contains('不能据此认定当前客户端或壁纸已经关闭')) 'public entry failure does not invent mode or terminate state'
+$entryStillPlaying=Event '2026-10-24T11:00:01Z' 'success'
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying,$entryStillPlaying)) @($entryFailure)) $null
+Check ($text.Contains('公开入口操作异常') -and -not $text.Contains('当时确认了首帧')) 'continuing existing host cannot erase separate public entry failure'
+$entryStart=StartupEntry '2026-10-24T11:00:02Z'
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying) @($entryStart)) @($entryFailure)) $null
+Check (-not $text.Contains('公开入口操作异常') -and -not $text.Contains('PUBLIC_CODE_INTEGRITY_FAILED')) 'later real launcher boundary retires older public failure'
+$entryNewHost=[pscustomobject]@{utc='2026-10-24T11:00:02Z';category='host-phase';phase=20;code=0}
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying,$entryNewHost,(Event '2026-10-24T11:00:03Z' 'success'))) @($entryFailure)) $null
+Check (-not $text.Contains('公开入口操作异常') -and $text.Contains('当时确认了首帧')) 'new host and new playback supersede old public error'
+$entrySameStart=StartupEntry '2026-10-24T11:00:00Z'
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryStillPlaying) @($entrySameStart)) @($entryFailure)) $null
+Check ($text.Contains('公开入口记录的先后关系无法确认') -and -not $text.Contains('当时确认了首帧') -and -not $text.Contains('公开入口操作异常：')) 'same-time real boundary does not manufacture ordering'
+$entryOtherFailure=PublicEntry '2026-10-24T11:00:00Z' 'PUBLIC_MEDIA_INCOMPLETE'
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @($entryFailure,$entryOtherFailure)) $null
+Check ($text.Contains('公开入口记录的先后关系无法确认') -and -not $text.Contains('当时确认了首帧')) 'different public results at same latest timestamp stay ambiguous'
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @($entryFailure,$entryFailure)) $null
+Check ($text.Contains('公开入口操作异常') -and -not $text.Contains('先后关系无法确认')) 'identical duplicated public records are idempotent'
+foreach($time in @('','invalid PRIVATE','2026-10-24T11:00:99Z')){
+    $text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @((PublicEntry $time 'PUBLIC_CODE_INTEGRITY_FAILED'))) $null
+    Check ($text.Contains('公开入口记录的先后关系无法确认') -and -not $text.Contains('当时确认了首帧') -and -not $text.Contains('PRIVATE')) 'untimed recognized error cannot establish latest chronology or preserve assumed success'
+}
+$entryWithoutTime=[pscustomobject]@{category='public-entry';publicCode='PUBLIC_LAUNCH_FAILED'}
+Check ((Get-CodexDiagnosticAnalysis (WithPublic (Report) @($entryWithoutTime)) $null).Contains('公开入口记录的先后关系无法确认')) 'missing timestamp remains uncorrelated'
+$entryBusy=PublicEntry '2026-10-24T11:00:01Z' 'PUBLIC_ENTRY_BUSY'
+$entryZero=PublicEntry '2026-10-24T11:00:01Z' 'PUBLIC_CHILD_EXIT' 0
+foreach($neutral in @($entryBusy,$entryZero)){
+    $text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @($neutral)) $null
+    Check (-not $text.Contains('公开入口操作异常') -and -not $text.Contains('公开入口记录的先后关系无法确认')) 'busy or child exit zero alone is not an error or playback proof'
+    $text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @($entryFailure,$neutral)) $null
+    Check ($text.Contains('PUBLIC_CODE_INTEGRITY_FAILED') -and -not $text.Contains('当时确认了首帧')) 'neutral public result cannot erase an earlier error without true startup boundary'
+}
+foreach($exit in @(-2147483648,-1,1,76,2147483647)){
+    $text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @((PublicEntry '2026-10-24T11:00:00Z' 'PUBLIC_CHILD_EXIT' $exit))) $null
+    Check ($text.Contains('PUBLIC_CHILD_EXIT') -and $text.Contains(('exitCode='+$exit)) -and -not $text.Contains('当时确认了首帧')) 'bounded nonzero signed child code retained as entry evidence'
+}
+foreach($exit in @('76 PRIVATE',0.5,2147483648L,$null)){
+    $text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @((PublicEntry '2026-10-24T11:00:00Z' 'PUBLIC_CHILD_EXIT' $exit))) $null
+    Check (-not $text.Contains('公开入口操作异常') -and -not $text.Contains('PRIVATE')) 'malformed child code not coerced or echoed'
+}
+$entryUnknown=PublicEntry '2026-10-24T11:00:00Z' 'PUBLIC_CODE_INTEGRITY_FAILED PRIVATE C:\Users\SECRET'
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @($entryUnknown)) $null
+Check (-not $text.Contains('公开入口操作异常') -and $text -notmatch 'PRIVATE|SECRET') 'public code is an exact fixed allowlist'
+$text=Get-CodexDiagnosticAnalysis (Report @($entryFailure,$entryOldPlaying)) $null
+Check (-not $text.Contains('公开入口操作异常')) 'host log cannot impersonate public entry source'
+$entryWrongCategory=[pscustomobject]@{utc=$entryFailure.utc;category='launcher-stage';publicCode=$entryFailure.publicCode}
+Check (-not (Get-CodexDiagnosticAnalysis (WithPublic (Report) @($entryWrongCategory)) $null).Contains('公开入口操作异常')) 'public log requires public-entry category'
+$entrySameZero=PublicEntry $entryFailure.utc 'PUBLIC_CHILD_EXIT' 0
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @($entryFailure,$entrySameZero)) $null
+Check ($text.Contains('公开入口记录的先后关系无法确认') -and -not $text.Contains('当时确认了首帧')) 'same-time neutral and failed public results cannot be ordered'
+$r=WithPublic (Report @($entryOldPlaying)) @($entryFailure)
+$r.logs+=[pscustomobject]@{log='unknown-source';records=@($entryStart,$entryNewHost)}
+Check ((Get-CodexDiagnosticAnalysis $r $null).Contains('PUBLIC_CODE_INTEGRITY_FAILED')) 'unknown log cannot fabricate a newer boundary'
+$entryMode=PublicEntry $entryFailure.utc 'PUBLIC_CODE_INTEGRITY_FAILED'
+$entryMode|Add-Member -NotePropertyName mode -NotePropertyValue 'preview PRIVATE_SECRET'
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @($entryOldPlaying)) @($entryMode)) $null
+Check ($text.Contains('没有运行模式标记') -and -not $text.Contains('PRIVATE_SECRET')) 'untrusted added mode never attributes entry failure to preview or normal start'
+$r=WithPublic (Report @($entryOldPlaying)) @($entryFailure);$r.logs+=$r.logs[-1]
+$text=Get-CodexDiagnosticAnalysis $r $null
+Check ($text.Contains('公开入口记录的先后关系无法确认') -and -not $text.Contains('当时确认了首帧')) 'duplicate public sources do not prove a single latest operation'
+foreach($code in @('PUBLIC_PREPARATION_TIMEOUT','PUBLIC_LAUNCH_FAILED','PUBLIC_CHILD_TIMEOUT','PUBLIC_COMPONENT_OR_SIGNATURE_REJECTED','PUBLIC_PREPARATION_FAILED','PUBLIC_UNSUPPORTED_WINDOWS','PUBLIC_CODE_INTEGRITY_FAILED','PUBLIC_MEDIA_INCOMPLETE','PUBLIC_LAUNCHER_CONFIG_INVALID','PUBLIC_LAUNCHER_ASSET_INVALID','PUBLIC_OFFICIAL_CODEX_NOT_INSTALLED','PUBLIC_PACKAGE_ENUMERATION_FAILED','PUBLIC_SUPPORTED_CODEX_EXECUTABLE_NOT_FOUND','PUBLIC_OFFICIAL_DISCOVERY_FAILED','PUBLIC_OFFICIAL_IDENTITY_REJECTED','PUBLIC_OFFICIAL_RUNTIME_UNSUPPORTED')){
+    $text=Get-CodexDiagnosticAnalysis (WithPublic (Report) @((PublicEntry '2026-10-24T11:00:00Z' $code))) $null
+    Check ($text.Contains('公开入口操作异常') -and $text.Contains($code)) ('public fixed failure classification '+$code)
+}
+$text=Get-CodexDiagnosticAnalysis (WithPublic (Report @() $replayStages) @((PublicEntry '2026-10-22T12:28:49Z' 'PUBLIC_CHILD_EXIT' 76))) $null
+Check ($text.Contains('重复启动分支未找到可验证的目标窗口') -and $text.Contains('PUBLIC_CHILD_EXIT')) 'entry exit preserves specific replay cause rather than replacing it'
 $receipt=[ordered]@{passed=$true;checks=$checks;scope='Pure synthetic diagnostics; no filesystem media inspection, process launch, GPU test or network.'}
 [IO.File]::WriteAllText((Join-Path $WorkRoot 'results.json'),($receipt|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
 Write-Output ('ALL PASS: diagnostic analysis checks='+$checks)

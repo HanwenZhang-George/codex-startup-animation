@@ -1,6 +1,7 @@
 ﻿param(
     [string]$Source,
-    [Parameter(Mandatory=$true)][string]$OutputDirectory
+    [Parameter(Mandatory=$true)][string]$OutputDirectory,
+    [ValidateSet('all','late-target-only')][string]$Scenario='all'
 )
 $ErrorActionPreference='Stop'
 $scriptDirectory=Split-Path -Parent $PSCommandPath
@@ -20,8 +21,12 @@ if(-not (Test-Path -LiteralPath $csc)){$csc=Join-Path $env:WINDIR 'Microsoft.NET
 if($LASTEXITCODE -ne 0){throw 'Compile failed'}
 $hashes=@(foreach($file in $files){Get-FileHash -LiteralPath $file -Algorithm SHA256 | Select-Object Path,Hash})
 [IO.File]::WriteAllText((Join-Path $outputRoot 'source-hashes.json'),($hashes | ConvertTo-Json),[Text.UTF8Encoding]::new($false))
-$result=& $assembly (Join-Path $outputRoot 'fixtures')
-$code=$LASTEXITCODE
+$previousPreference=$ErrorActionPreference
+try {
+    $ErrorActionPreference='Continue'
+    $result=& $assembly (Join-Path $outputRoot 'fixtures') $Scenario 2> (Join-Path $outputRoot 'test-stderr.txt')
+    $code=$LASTEXITCODE
+} finally { $ErrorActionPreference=$previousPreference }
 [IO.File]::WriteAllText((Join-Path $outputRoot 'results.json'),($result -join [Environment]::NewLine),[Text.UTF8Encoding]::new($false))
 $result
 exit $code

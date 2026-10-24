@@ -20,14 +20,25 @@ namespace DragonLauncher
         private readonly uint pid;
         private readonly long created;
         private readonly string executable;
-        private ExistingReplayTarget(IntPtr window,uint pid,long created,string executable)
-        {Window=window;this.pid=pid;this.created=created;this.executable=executable;}
+        private readonly bool initiallyMinimized;
+        private int initialMinimizeClaimed;
+        private ExistingReplayTarget(IntPtr window,uint pid,long created,string executable,bool initiallyMinimized)
+        {Window=window;this.pid=pid;this.created=created;this.executable=executable;this.initiallyMinimized=initiallyMinimized;}
+        internal static bool CandidateCountsValid(string counts)
+        {
+            // Older public builds emit the first five counters. The complete
+            // extension is optional, but partial, duplicated, reordered or
+            // free-form suffixes are never forwarded to the shared log.
+            return counts!=null&&counts.Length<=512&&System.Text.RegularExpressions.Regex.IsMatch(counts,
+                @"\AverifiedWindows=[0-9]{1,5}; visible=[0-9]{1,5}; hidden=[0-9]{1,5}; cloaked=[0-9]{1,5}; eligible=[0-9]{1,5}(?:; minimized=[0-9]{1,5}; ownedRejected=[0-9]{1,5}; childRejected=[0-9]{1,5}; toolRejected=[0-9]{1,5}; cloakedRejected=[0-9]{1,5}; rectUnavailable=[0-9]{1,5}; sizeRejected=[0-9]{1,5}; stateChanged=[0-9]{1,5})?\z",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        }
         private static void LogCandidates(Settings settings,Action<string> log,int phase)
         {
             try{
                 if(log==null)return;
                 string counts=NativeHandoff.DescribeTargetAvailability(settings);
-                bool valid=System.Text.RegularExpressions.Regex.IsMatch(counts,@"\AverifiedWindows=\d{1,5}; visible=\d{1,5}; hidden=\d{1,5}; cloaked=\d{1,5}; eligible=\d{1,5}\z",System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+                bool valid=CandidateCountsValid(counts);
                 log("replay-native-candidates phase="+phase.ToString(System.Globalization.CultureInfo.InvariantCulture)+" "+(valid?counts:"countsUnavailable=true"));
             }catch{} // Fixed diagnostic counts must not change window selection.
         }
@@ -54,7 +65,7 @@ namespace DragonLauncher
                 using(var process=BridgeNative.OpenReadProcess(processId)){
                     long start;IntPtr handle=process.DangerousGetHandle();
                     if(!BridgeNative.IsAlive(handle)||!BridgeNative.CreationTime(handle,out start)){reason=3;return null;}
-                    var result=new ExistingReplayTarget(window,processId,start,BridgeNative.ImagePath(handle));
+                    var result=new ExistingReplayTarget(window,processId,start,BridgeNative.ImagePath(handle),NativeHandoff.IsVerifiedMinimized(window));
                     phase=6;if(!result.IsCurrentCore()){reason=4;return null;}phase=7;return result;
                 }
             }catch(Exception error){failure=error;reason=5;return null;}
@@ -62,6 +73,11 @@ namespace DragonLauncher
         }
         internal bool IsCurrent
         {get{try{return IsCurrentCore();}catch{return false;}}}
+        // A repeat click may select a client that was already minimized. Grant
+        // one restoration capability only to that pinned process/window. A
+        // later minimize in an originally visible replay is never authorized.
+        internal bool ClaimInitialMinimizedRestore(IntPtr window)
+        {return initiallyMinimized&&window==Window&&IsCurrent&&NativeHandoff.IsVerifiedMinimized(window)&&Interlocked.CompareExchange(ref initialMinimizeClaimed,1,0)==0;}
         private bool IsCurrentCore()
         {
             if(Window==IntPtr.Zero||pid==0||pid>Int32.MaxValue||created<=0)return false;

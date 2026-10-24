@@ -175,8 +175,22 @@ namespace CodexDragon.Official {
             }finally{CloseHandle(handle);}
         }
         public static OfficialIdentitySnapshot ResolveCurrent() {
-            var selected=SelectCurrent(Registered());var lease=Acquire(selected);
-            try{var current=SelectCurrent(Registered());if(current.FullName!=selected.FullName||!String.Equals(current.Executable,selected.Executable,StringComparison.OrdinalIgnoreCase))throw Failure("official-registration-changing");return new OfficialIdentitySnapshot(lease,0,0);}catch{Release(lease);throw;}
+            return ResolveCurrent(Registered,Acquire);
+        }
+        internal static OfficialIdentitySnapshot ResolveCurrent(Func<IList<PackageRecord>> inventory,Func<PackageRecord,IdentityLease> acquire) {
+            // A Store update can finish between discovery and trust checking.
+            // Reacquire at most once, only after two valid inventories disagree.
+            // Signature, path, manifest and inventory errors still fail closed;
+            // this never reselects the identity of an already running process.
+            for(int attempt=0;attempt<2;attempt++){
+                var selected=SelectCurrent(inventory());var lease=acquire(selected);
+                try{
+                    var current=SelectCurrent(inventory());
+                    if(current.FullName==selected.FullName&&String.Equals(current.Executable,selected.Executable,StringComparison.OrdinalIgnoreCase))return new OfficialIdentitySnapshot(lease,0,0);
+                }catch{Release(lease);throw;}
+                Release(lease); // Never hold the superseded version while retrying.
+            }
+            throw Failure("official-registration-changing");
         }
         public static OfficialIdentitySnapshot VerifyProcess(int pid,long creation) {
             int session=CurrentSession();var first=Probe(pid);var selected=MatchProcess(first,Registered(),session,creation);var lease=Acquire(selected);

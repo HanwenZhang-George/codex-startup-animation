@@ -23,6 +23,17 @@ internal static class ReplayReadOnlyHandleTests {
  [DllImport("ntdll.dll")] static extern int NtQueryObject(IntPtr handle,int information,IntPtr buffer,uint length,out uint needed);
  static uint GrantedAccess(IntPtr handle){IntPtr data=Marshal.AllocHGlobal(56);try{uint needed;if(NtQueryObject(handle,0,data,56,out needed)!=0)throw new Exception("query owned handle access");return (uint)Marshal.ReadInt32(data,4);}finally{Marshal.FreeHGlobal(data);}}
  static void WriteJson<T>(string file,T data){using(var stream=File.Create(file))new DataContractJsonSerializer(typeof(T)).WriteObject(stream,data);}
+ static void CandidateCountCases(){
+  const string baseline="verifiedWindows=22; visible=1; hidden=21; cloaked=0; eligible=0";
+  const string extra="; minimized=0; ownedRejected=1; childRejected=0; toolRejected=0; cloakedRejected=0; rectUnavailable=0; sizeRejected=0; stateChanged=0";
+  Check(ExistingReplayTarget.CandidateCountsValid(baseline),"legacy five-counter report remains valid");
+  Check(ExistingReplayTarget.CandidateCountsValid(baseline+extra),"complete extended candidate counts pass allowlist");
+  Check(ExistingReplayTarget.CandidateCountsValid((baseline+extra).Replace("=0","=99999").Replace("=1;","=99999;")),"counter upper bound accepted");
+  foreach(string value in new[]{null,"",baseline+"\n",baseline+" title=PRIVATE",baseline+"; minimized=0",baseline+extra+"; stateChanged=1",baseline+extra+"\r\nPRIVATE",
+   baseline.Replace("visible=1","visible=-1"),baseline.Replace("visible=1","visible=1.0"),baseline.Replace("visible=1","visible=100000"),baseline.Replace("visible=1","visible=\u0661"),
+   (baseline+extra).Replace("; ownedRejected=1; childRejected=0","; childRejected=0; ownedRejected=1"),(baseline+extra).Replace("stateChanged=0","stateChanged=PRIVATE"),new string('0',513)})
+   Check(!ExistingReplayTarget.CandidateCountsValid(value),"malformed private partial reordered or oversized count record refused");
+ }
  static int Child(string root,string token){
   File.WriteAllText(Path.Combine(root,"child-stage"),"entered");
   using(var own=Process.GetCurrentProcess()){
@@ -86,6 +97,10 @@ internal static class ReplayReadOnlyHandleTests {
      Check(replayLogs.Exists(line=>line.StartsWith("replay-diagnostic operation=attest phase=4 ",StringComparison.Ordinal)&&line.Contains(" reason=9 ")),"invalid pin diagnosis identifies exact bounded stage and reason");
      Check(ExistingReplayTarget.Find(new Settings{AppId="",Exe=executable},root,line=>replayLogs.Add(line))==null,"no main window remains unavailable without activation");
      Check(replayLogs.Exists(line=>line.StartsWith("replay-native-candidates phase=1 ",StringComparison.Ordinal))&&replayLogs.Exists(line=>line.StartsWith("replay-native-candidates phase=4 ",StringComparison.Ordinal)),"both native selection attempts have fixed candidate counts");
+     foreach(string line in replayLogs)if(line.StartsWith("replay-native-candidates ",StringComparison.Ordinal)){
+      Check(!line.Contains("countsUnavailable=true")&&line.Contains("; minimized=")&&line.Contains("; stateChanged="),"real native availability extension survives LogCandidates allowlist");
+      int start=line.IndexOf("verifiedWindows=",StringComparison.Ordinal);Check(start>=0&&ExistingReplayTarget.CandidateCountsValid(line.Substring(start)),"actual emitted native count block stays within fixed schema");
+     }
      Check(replayLogs.Exists(line=>line.StartsWith("replay-diagnostic operation=find phase=4 ",StringComparison.Ordinal)&&line.Contains(" reason=1 ")),"find unavailable has a distinct reason");
      foreach(string line in replayLogs)if(line.StartsWith("replay-",StringComparison.Ordinal))Check(line.IndexOf(root,StringComparison.OrdinalIgnoreCase)<0&&!line.Contains("pid=")&&!line.Contains("session="),"new replay diagnostics exclude path process and session identity");
      Check(BridgeClientIdentity.Attest(new Settings(),root,session,delegate(string ignored){throw new InvalidOperationException("sink");})==null,"failing diagnostic sink cannot authorize invalid pin");
@@ -120,7 +135,7 @@ internal static class ReplayReadOnlyHandleTests {
  }
  [STAThread] static int Main(string[] args){
   if(args.Length==3&&args[0]=="--owned-child"){try{return Child(args[1],args[2]);}catch(Exception error){File.WriteAllText(Path.Combine(args[1],"child-stage"),"exception-"+error.GetType().Name+"-"+(error.HResult&65535));return 13;}}
-  try{Run(args[0]);Console.WriteLine("{\"passed\":true,\"checks\":"+checks+",\"actualCodexStarted\":false,\"ownedRestrictedChildAndRealPipe\":true}");return 0;}
+  try{CandidateCountCases();Run(args[0]);Console.WriteLine("{\"passed\":true,\"checks\":"+checks+",\"actualCodexStarted\":false,\"ownedRestrictedChildAndRealPipe\":true}");return 0;}
   catch(Exception error){Console.WriteLine("FAIL: "+error.Message);return 1;}
  }
 }

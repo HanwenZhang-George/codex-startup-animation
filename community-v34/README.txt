@@ -1,9 +1,38 @@
 Codex Dragon — community startup animation and dynamic wallpaper
-Portable V34-r10 automatic-update adaptation test candidate for Windows 10/11 x64
+Portable V34-r13 reliability and shell-layout test candidate for Windows 10/11 x64
 
 STATUS
-This test candidate starts from the freshly downloaded public R9 ZIP. It ports
-the verified local official-identity and hidden/maximized-window handoff fixes.
+R13 continues from the sealed R12 public candidate. Cold target discovery now
+uses a bounded adaptive response allowance (2 to 4 seconds), within one absolute
+30-second horizon; attach is issued once, capped at 12 seconds and remaining time.
+Initial hidden-window recovery retains its already verified ownership even if
+additional hidden auxiliary windows appear. Ambiguous unowned windows are untouched.
+Diagnostics distinguish target loss, transport failure and process exit without
+claiming an exit code proves user intent. All earlier identity and media protections remain.
+
+This candidate starts from the freshly downloaded public R10 ZIP on 2026-10-24.
+It adds a narrowly checked official page-surface shell when no default main
+exists. Empty, conflicting and unknown page structures remain unsupported.
+The report proves a missing default main blocked wallpaper preparation, but
+does not identify that user's exact page structure. Playback confirmation on
+the affected computer is required before publication.
+Detailed diagnostics add bounded shell counts, relative window edges, DPI and
+numeric environment evidence. No raw DOM, titles, chat or credentials.
+R12 also follows verified shell attributes when the official UI changes in place,
+records bounded runtime layout evidence after preparation, and discovers optional
+official shortcut targets from the registered manifest rather than old EXE names.
+A registration change during identity acquisition allows exactly one rediscovery;
+signature/path failures still fail closed. No media quality, animation timing,
+random appearance policy or resource protection has been reduced.
+An explicit repeated launch can restore the same verified target if it was already
+minimized when selected. Restoration is bounded and nonactivating, with guarded
+position/restore-state compensation on failure. Later user minimization is preserved.
+Detailed analysis separates a newer public-entry failure from old playback evidence;
+unknown operation modes and conflicting timestamps are reported as uncertain.
+Developer regression coverage and remaining real-PC boundaries are documented in
+source/tests/reliability-test-cases.md. Users only need Diagnostics, not those tests.
+
+R10 official-identity and hidden/maximized-window handoff fixes remain.
 The official Store executable is discovered from registered package metadata,
 validated by signature, and held through child creation. The handoff then checks
 that actual process and creation time instead of reselecting a newer version.
@@ -12,7 +41,7 @@ or executable hash. Ordinary package version/path updates are resolved on launch
 This candidate has NOT been published; a separate-PC playback test is pending.
 The existing public release/download URLs will be retained after approval.
 
-This candidate corrects a second memory gate in wallpaper preparation. A Windows
+This candidate retains the earlier memory-gate fix in wallpaper preparation. A Windows
 low-physical-memory notification or a low RAM reading no longer disables playback
 when the current process still has sufficient available commit. Critical commit
 below 512 MiB suspends the decoder; recovery requires at least 1 GiB of available
@@ -151,8 +180,17 @@ or Test-PublicPackage.ps1 for full SHA-256 verification. No tool waits for playb
 The permanent Diagnostics folder provides One-Click-Diagnostics.cmd, with fixed
 Reports/latest-report.zip and Reports/latest-analysis.txt outputs. It overwrites
 only these latest report outputs instead of accumulating archives. Its default
-mode reads bounded records and runs no GPU test, application launch, install or
-network operation. Check-All-Files.cmd is an optional full hash verification.
+Detailed mode verifies all packaged files and then collects bounded records and
+numeric environment evidence, even when verification reports a damaged file.
+Run it soon after reproducing the problem in this package. It performs no GPU
+stress test, application launch, install or network operation. Check-All-Files.cmd
+can verify files alone; Run-Diagnostics.ps1 -Mode Report skips full hashing.
+Records include fixed page-shape counts, relative window edges and DPI, candidate
+rejection counts, historical media/first-frame/resource/transport states and
+current numeric system/driver evidence. Each log is limited to 256 KiB and 512
+allowlisted records; truncation is explicit. Driver registration is not actual
+decoder/GPU utilization. One report can narrow causes but cannot prove every
+machine or guarantee a single-round resolution.
 Only the report ZIP should be shared; generated Reports are excluded from release.
 
 VERIFY / REBUILD

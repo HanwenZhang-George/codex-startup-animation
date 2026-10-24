@@ -24,7 +24,7 @@ namespace DragonLauncher
         private const uint SwpNoSize = 0x0001, SwpNoMove = 0x0002,
             SwpNoZOrder = 0x0004, SwpNoActivate = 0x0010,
             SwpNoOwnerZOrder = 0x0200, SwpAsyncWindowPos = 0x4000;
-        private const int SwRestore = 9, TransitionsForceDisabled = 3, ExtendedFrameBounds = 9, Cloaked = 14;
+        private const int TransitionsForceDisabled = 3, ExtendedFrameBounds = 9, Cloaked = 14;
         private const uint SmtoBlock = 0x0001, SmtoAbortIfHung = 0x0002,
             SmtoErrorOnExit = 0x0020;
         private static readonly uint OwnPid = (uint)Process.GetCurrentProcess().Id;
@@ -45,6 +45,66 @@ namespace DragonLauncher
         private static long probedAt = -1000;
         private static bool probedResponsive;
         private static int compositorFencePending;
+        private static readonly GeometryDiagnostics GeometryLog = new GeometryDiagnostics();
+
+        // Fixed numeric geometry only. Absolute desktop coordinates, window
+        // identifiers, titles and paths never leave this observer. Invalid or
+        // unavailable offsets use a sentinel distinct from a legitimate -1px.
+        internal struct GeometryRect
+        {
+            internal int Left, Top, Right, Bottom;
+            internal GeometryRect(int left,int top,int right,int bottom)
+            {Left=left;Top=top;Right=right;Bottom=bottom;}
+        }
+        internal sealed class GeometryObservation
+        {
+            internal GeometryRect? Cover, Target, Frame;
+            internal int TargetVisible=-1, TargetMinimized=-1, TargetCloaked=-1;
+            internal int TargetDpi=-1, CoverDpi=-1;
+        }
+        internal sealed class GeometryDiagnostics
+        {
+            internal const int UnknownOffset=Int32.MinValue;
+            private long lastAt=-1;
+            private int count;
+            internal bool Due(long now)
+            {return now>=0&&count<48&&(lastAt<0||(now>=lastAt&&now-lastAt>=2000));}
+            private static int Flag(int value){return value==0||value==1?value:-1;}
+            private static int Dpi(int value){return value>=48&&value<=768?value:-1;}
+            private static bool Dimensions(GeometryRect? value,out long width,out long height)
+            {
+                width=height=-1;if(!value.HasValue)return false;
+                long w=(long)value.Value.Right-value.Value.Left,h=(long)value.Value.Bottom-value.Value.Top;
+                if(w<1||w>65536||h<1||h>65536)return false;
+                width=w;height=h;return true;
+            }
+            private static bool InRange(long value,int maximum){return value>=-maximum&&value<=maximum;}
+            internal string Record(long now,int phase,GeometryObservation value)
+            {
+                if(!Due(now)||phase< -1||phase>2||value==null)return null;
+                long cw,ch,tw,th,fw,fh;
+                bool cover=Dimensions(value.Cover,out cw,out ch),target=Dimensions(value.Target,out tw,out th);
+                bool frame=target&&Dimensions(value.Frame,out fw,out fh);
+                long dl=UnknownOffset,dt=UnknownOffset,dr=UnknownOffset,db=UnknownOffset;
+                if(cover&&target){
+                    GeometryRect c=value.Cover.Value,t=value.Target.Value;
+                    long l=(long)t.Left-c.Left,top=(long)t.Top-c.Top,r=(long)t.Right-c.Right,b=(long)t.Bottom-c.Bottom;
+                    if(InRange(l,65536)&&InRange(top,65536)&&InRange(r,65536)&&InRange(b,65536)){dl=l;dt=top;dr=r;db=b;}
+                }
+                long il=UnknownOffset,it=UnknownOffset,ir=UnknownOffset,ib=UnknownOffset;
+                if(frame){
+                    GeometryRect t=value.Target.Value,f=value.Frame.Value;
+                    long l=(long)f.Left-t.Left,top=(long)f.Top-t.Top,r=(long)t.Right-f.Right,b=(long)t.Bottom-f.Bottom;
+                    frame=InRange(l,1024)&&InRange(top,1024)&&InRange(r,1024)&&InRange(b,1024);
+                    if(frame){il=l;it=top;ir=r;ib=b;}
+                }
+                lastAt=now;count++;
+                return String.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    "Native geometry; phase={0}; coverRectKnown={1}; targetRectKnown={2}; frameKnown={3}; targetVisible={4}; targetMinimized={5}; targetCloaked={6}; targetDpi={7}; coverDpi={8}; coverWidth={9}; coverHeight={10}; targetWidth={11}; targetHeight={12}; deltaLeft={13}; deltaTop={14}; deltaRight={15}; deltaBottom={16}; frameInsetLeft={17}; frameInsetTop={18}; frameInsetRight={19}; frameInsetBottom={20}",
+                    phase,cover?1:0,target?1:0,frame?1:0,Flag(value.TargetVisible),Flag(value.TargetMinimized),Flag(value.TargetCloaked),Dpi(value.TargetDpi),Dpi(value.CoverDpi),
+                    cw,ch,tw,th,dl,dt,dr,db,il,it,ir,ib);
+            }
+        }
 
         private sealed class TargetIdentity
         {
@@ -147,6 +207,8 @@ namespace DragonLauncher
             private long started;
             private long placementQueuedAt=-1;
             private long maximizedRestoreQueuedAt=-1;
+            private long minimizedRestoreQueuedAt=-1;
+            private bool initialMinimizedAuthorized,initialMinimizedPending,initialMinimizedRestored;
             private long handoffArmedAt=-1;
             private readonly int timeoutMilliseconds;
             private int phase;
@@ -164,7 +226,7 @@ namespace DragonLauncher
             internal long PreparationElapsedMilliseconds { get { return Math.Max(0,CacheClock.ElapsedMilliseconds-started); } }
             internal string ReadinessDiagnostic {get{return DescribeReadiness(target)+"; postReadyLossMs="+readinessLoss.LostMilliseconds(CacheClock.ElapsedMilliseconds)+(phase==2?"; "+PlacementGeometry():"");}}
 
-            internal CompactPlacement(IntPtr target, Window film, int timeoutMilliseconds = 2000)
+            internal CompactPlacement(IntPtr target, Window film, int timeoutMilliseconds = 2000,ExistingReplayTarget replay=null)
             {
                 this.target=target; this.film=film;
                 // Cold Electron windows can exist before their UI thread is
@@ -188,12 +250,14 @@ namespace DragonLauncher
                         if(!GetWindowPlacement(target,ref original)){Fail("Cannot save target placement.");return;}
                     }
                     captured=true;
+                    initialMinimizedAuthorized=initialMinimizedPending=original.ShowCommand==2&&replay!=null&&replay.ClaimInitialMinimizedRestore(target);
                     if(!ReadFilmBounds(out desired)){Fail("Cannot read overlay bounds.");return;}
                     // Keep visible chrome inside the movie. The real frame is
                     // checked again after the application processes the request.
                     desired.Left+=6;desired.Top+=6;desired.Right-=6;desired.Bottom-=6;
                     if(desired.Width<128 || desired.Height<128){Fail("Overlay is too small.");return;}
                     started=CacheClock.ElapsedMilliseconds;phase=-1;
+                    ObserveGeometry();
                     NativeRect initial;bool hasRect=GetWindowRect(target,out initial);
                     LauncherDiagnostics.Write("handoff-latest.log","Native placement begin; visible="+IsWindowVisible(target)+
                         "; initialHiddenLease="+(identity.Bound!=null&&HasInitialHiddenLease(target,identity))+
@@ -209,6 +273,29 @@ namespace DragonLauncher
                 uint currentPid;ulong currentCreated;
                 return (recovery==null||!recovery.Armed||recovery.Owned)&&IsWindow(target) && GetWindowThreadProcessId(target,out currentPid)!=0 && currentPid==pid &&
                     TryGetCreationTime(currentPid,out currentCreated) && currentCreated==created && WindowMatches(target,identity);
+            }
+
+            private void ObserveGeometry()
+            {
+                // The caller already owns the physical-coordinate scope. This
+                // optional observer is bounded across the whole launcher, even
+                // if target rediscovery creates another placement transaction.
+                long now=CacheClock.ElapsedMilliseconds;if(!GeometryLog.Due(now))return;
+                try{
+                    var sample=new GeometryObservation();NativeRect cover,bounds,frame;
+                    if(ReadFilmBounds(out cover))sample.Cover=new GeometryRect(cover.Left,cover.Top,cover.Right,cover.Bottom);
+                    if(GetWindowRect(target,out bounds))sample.Target=new GeometryRect(bounds.Left,bounds.Top,bounds.Right,bounds.Bottom);
+                    if(DwmGetRect(target,ExtendedFrameBounds,out frame,Marshal.SizeOf(typeof(NativeRect)))==0)
+                        sample.Frame=new GeometryRect(frame.Left,frame.Top,frame.Right,frame.Bottom);
+                    if(IsWindow(target)){
+                        sample.TargetVisible=IsWindowVisible(target)?1:0;sample.TargetMinimized=IsIconic(target)?1:0;
+                        int cloaked;if(DwmGetInt(target,Cloaked,out cloaked,sizeof(int))==0)sample.TargetCloaked=cloaked!=0?1:0;
+                    }
+                    try{sample.TargetDpi=(int)GetDpiForWindow(target);sample.CoverDpi=(int)GetDpiForWindow(new WindowInteropHelper(film).Handle);}
+                    catch(EntryPointNotFoundException){ /* DPI remains unknown on older systems. */ }
+                    string line=GeometryLog.Record(now,phase,sample);
+                    if(line!=null)LauncherDiagnostics.Write("handoff-latest.log",line);
+                }catch{ /* Diagnostic failure never changes handoff or recovery. */ }
             }
 
             private bool ReadFilmBounds(out NativeRect rect)
@@ -283,6 +370,18 @@ namespace DragonLauncher
                 return confirmed;
             }
 
+            private bool HiddenMinimizedPlacementApplied(NativeRect cover)
+            {
+                // Only an explicitly repeated launch may restore a target that
+                // was minimized when pinned. Keep it hidden until the exact
+                // guardian-owned normal rectangle is acknowledged; never first
+                // flash its old full-size rectangle outside the movie.
+                if(!initialMinimizedPending||original.ShowCommand!=2||!RecoveryArmed||IsWindowVisible(target)||!IsIconic(target)||
+                    desired.Width<128||desired.Height<128||desired.Left<cover.Left||desired.Top<cover.Top||desired.Right>cover.Right||desired.Bottom>cover.Bottom)return false;
+                var placement=new NativeRestoreGuard.Placement{Length=(uint)Marshal.SizeOf(typeof(NativeRestoreGuard.Placement))};
+                return GetGuardWindowPlacement(target,ref placement)&&NativeRestoreGuard.OwnsPendingMinimizedPlacement(recovery.Record,placement,true,true);
+            }
+
             private string PlacementGeometry()
             {
                 NativeRect actual;bool rect=GetWindowRect(target,out actual);
@@ -309,6 +408,7 @@ namespace DragonLauncher
                     if(recovery!=null&&recovery.Armed&&!recovery.Available){Fail("Native recovery guardian is no longer available.");return false;}
                     if(!SameTarget()){Fail("Target window ended or changed identity.");return false;}
                     previous=EnterPhysicalCoordinates();
+                    ObserveGeometry();
                     if(Ready)
                     {
                         // After the owned hide/show completed, a later hide or
@@ -325,7 +425,7 @@ namespace DragonLauncher
                     if(phase==-1){
                         var guard=NativeRestoreGuard.Current;
                         if(guard==null||guard.Faulted){Fail("Native recovery guard unavailable.");return false;}
-                        if(recovery==null){if(!guard.Ready)return false;recovery=guard.Arm(target,desired.Left,desired.Top,desired.Right,desired.Bottom);if(recovery==null){Fail("Native recovery record refused.");return false;}}
+                        if(recovery==null){if(!guard.Ready)return false;recovery=initialMinimizedAuthorized?guard.ArmInitialMinimizedReplay(target,desired.Left,desired.Top,desired.Right,desired.Bottom):guard.Arm(target,desired.Left,desired.Top,desired.Right,desired.Bottom);if(recovery==null){Fail("Native recovery record refused.");return false;}}
                         if(recovery.Failed){Fail("Native recovery acknowledgement failed.");return false;}
                         if(!recovery.Armed)return false;
                         if(!RecoveryArmed){Fail("Native recovery lease ownership lost before hide.");return false;}
@@ -341,8 +441,10 @@ namespace DragonLauncher
                         // Electron can show itself again after the first queued
                         // hide. Observe acknowledgement and retry only that
                         // idempotent request, with an independent short bound.
+                        bool minimized=IsIconic(target);
+                        if(!minimized)initialMinimizedPending=false;
                         HideAcknowledgement hide=hideAcknowledgement.Observe(CacheClock.ElapsedMilliseconds,
-                            IsWindowVisible(target),IsIconic(target),RecoveryArmed);
+                            IsWindowVisible(target),minimized&&!initialMinimizedPending,RecoveryArmed);
                         if(hide==HideAcknowledgement.Minimized){Fail("Target minimized during hide acknowledgement.");return false;}
                         if(hide==HideAcknowledgement.LostOwnership){Fail("Native hide acknowledgement lost recovery ownership.");return false;}
                         if(hide==HideAcknowledgement.Expired){Fail("Native hide acknowledgement timed out; budgetMs=3000; requests="+hideAcknowledgement.Requests);return false;}
@@ -377,7 +479,8 @@ namespace DragonLauncher
                         NativeRect applied,cover;
                         bool physicalConfirmed=HiddenPlacementApplied(out applied,out cover);
                         bool maximizedNormalConfirmed=!physicalConfirmed&&HiddenMaximizedPlacementApplied(cover);
-                        if(!physicalConfirmed&&!maximizedNormalConfirmed)
+                        bool minimizedNormalConfirmed=!physicalConfirmed&&!maximizedNormalConfirmed&&HiddenMinimizedPlacementApplied(cover);
+                        if(!physicalConfirmed&&!maximizedNormalConfirmed&&!minimizedNormalConfirmed)
                         {
                             // Even an already matching anchor can belong to the
                             // old rectangle while the resize remains queued.
@@ -388,6 +491,7 @@ namespace DragonLauncher
                         }
                         LauncherDiagnostics.Write("handoff-latest.log","Native hidden placement confirmed; elapsedMs="+PreparationElapsedMilliseconds+
                             "; alreadyVisible="+alreadyVisible+"; maximizedNormalConfirmed="+maximizedNormalConfirmed+
+                            "; minimizedNormalConfirmed="+minimizedNormalConfirmed+
                             "; target="+applied.Left+","+applied.Top+","+applied.Right+","+applied.Bottom+
                             "; cover="+cover.Left+","+cover.Top+","+cover.Right+","+cover.Bottom);
                         // A visible exact rectangle is safe, but another one of
@@ -398,11 +502,18 @@ namespace DragonLauncher
                             hideShowOrdered=true;
                         }
                         if(maximizedNormalConfirmed)maximizedRestoreQueuedAt=CacheClock.ElapsedMilliseconds;
+                        if(minimizedNormalConfirmed){minimizedRestoreQueuedAt=CacheClock.ElapsedMilliseconds;initialMinimizedPending=false;}
                         if(!CompleteInitialHiddenLease(target)){Fail("Cannot release initial hidden-window lease.");return false;}
                         phase=1;return false;
                     }
                     if(maximizedRestoreQueuedAt>=0&&PlacementConfirmationExpired(maximizedRestoreQueuedAt,CacheClock.ElapsedMilliseconds))
                     {Fail("Maximized placement restore confirmation timed out; budgetMs=3000; "+PlacementGeometry());return false;}
+                    if(minimizedRestoreQueuedAt>=0){
+                        if(!IsIconic(target))initialMinimizedRestored=true;
+                        else if(initialMinimizedRestored){Fail("Replay target minimized again after initial restoration.");return false;}
+                        if(PlacementConfirmationExpired(minimizedRestoreQueuedAt,CacheClock.ElapsedMilliseconds))
+                        {Fail("Minimized replay restore confirmation timed out; budgetMs=3000; "+PlacementGeometry());return false;}
+                    }
                     if(!IsReady(target))return false;
                     if(!FitsFilm()){Fail("Application minimum size does not fit the overlay.");return false;}
                     Ready=true;wasReady=true;return true;
@@ -481,6 +592,9 @@ namespace DragonLauncher
                     int cloaked;
                     bool isCloaked=DwmGetInt(target,Cloaked,out cloaked,sizeof(int))==0&&cloaked!=0;
                     bool minimized=IsIconic(target);
+                    var currentPlacement=new NativeRestoreGuard.Placement{Length=(uint)Marshal.SizeOf(typeof(NativeRestoreGuard.Placement))};
+                    bool initialMinimizedNormalOwned=initialMinimizedAuthorized&&recovery!=null&&
+                        GetGuardWindowPlacement(target,ref currentPlacement)&&NativeRestoreGuard.OwnsInitialMinimizedNormalPlacement(recovery.Record,currentPlacement,minimized);
                     bool pendingHide=hideAcknowledgement!=null&&NeedsHideCompensation(hideAcknowledgement.Requests,hideShowOrdered);
                     if(pendingHide){
                         // IsWindowVisible can still describe the pre-request
@@ -491,7 +605,7 @@ namespace DragonLauncher
                             !ShowWindowAsync(target,minimized?7:8))return;
                         hideShowOrdered=true;
                     }
-                    if((pendingHide&&minimized)||ReadinessLossPolicy.PreservePresentation(wasReady,IsWindowVisible(target),minimized,isCloaked))
+                    if((pendingHide&&minimized&&!initialMinimizedNormalOwned)||ReadinessLossPolicy.PreservePresentation(wasReady||initialMinimizedRestored,IsWindowVisible(target),minimized,isCloaked))
                     {
                         // This waiver is evaluated only during terminal cleanup,
                         // never during the recovery grace. A transient hide that
@@ -674,6 +788,8 @@ namespace DragonLauncher
         private static extern int DwmFlush();
         [DllImport("user32.dll")]
         private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr window);
         [DllImport("user32.dll")]
         private static extern int GetSystemMetrics(int index);
         [DllImport("user32.dll")]
@@ -872,12 +988,14 @@ namespace DragonLauncher
 
         internal static bool FindCurrentStillValid(IntPtr target)
         { try{return IsVerified(target);}catch{return false;} }
+        internal static bool IsVerifiedMinimized(IntPtr target)
+        {try{return IsVerified(target)&&IsIconic(target);}catch{return false;}}
 
         internal static void RegisterBridgeTarget(BridgeClientIdentity identity)
         {if(identity==null)throw new ArgumentNullException("identity");bridgeTarget=identity;}
 
-        internal static CompactPlacement PrepareTargetInOverlay(IntPtr target,Window film,int timeoutMilliseconds = 2000)
-        { return new CompactPlacement(target,film,timeoutMilliseconds); }
+        internal static CompactPlacement PrepareTargetInOverlay(IntPtr target,Window film,int timeoutMilliseconds = 2000,ExistingReplayTarget replay=null)
+        { return new CompactPlacement(target,film,timeoutMilliseconds,replay); }
 
         private static bool TryGetCreationTime(uint pid, out ulong created)
         {
@@ -949,6 +1067,23 @@ namespace DragonLauncher
         // Electron windows into candidates: a normal client also owns hidden
         // background and tray windows. This records only counts, never titles
         // or page contents, and never changes another window's state.
+        internal enum CandidateExclusion { None, StateChanged, Owned, Child, Tool, Cloaked, RectUnavailable, TooSmall }
+        internal static CandidateExclusion DescribeCandidateExclusion(IntPtr window)
+        {
+            // Mirror IsMainCandidate(window, true) in exactly its predicate
+            // order. This is diagnostic only; selection still uses the original
+            // predicate. No class-name criterion exists in native selection.
+            if(window==IntPtr.Zero||!IsWindow(window)||!IsWindowVisible(window))return CandidateExclusion.StateChanged;
+            if(GetWindow(window,GwOwner)!=IntPtr.Zero)return CandidateExclusion.Owned;
+            if((WindowStyle(window,GwlStyle)&WsChild)!=0)return CandidateExclusion.Child;
+            if((WindowStyle(window,GwlExStyle)&WsExToolWindow)!=0)return CandidateExclusion.Tool;
+            int cloak;if(DwmGetInt(window,Cloaked,out cloak,sizeof(int))==0&&cloak!=0)return CandidateExclusion.Cloaked;
+            // Minimized windows are accepted by replay discovery. Reporting
+            // them as a rejection would misdiagnose the user's next click.
+            if(IsIconic(window))return CandidateExclusion.None;
+            NativeRect rect;if(!GetWindowRect(window,out rect))return CandidateExclusion.RectUnavailable;
+            return rect.Width>=64&&rect.Height>=64?CandidateExclusion.None:CandidateExclusion.TooSmall;
+        }
         internal static string DescribeTargetAvailability(Settings settings)
         {
             try
@@ -956,6 +1091,7 @@ namespace DragonLauncher
                 TargetIdentity expected=FromSettings(settings);
                 if(expected==null)return "targetIdentity=unavailable";
                 int verified=0,visible=0,hidden=0,cloaked=0,eligible=0;
+                int minimized=0,ownedRejected=0,childRejected=0,toolRejected=0,cloakedRejected=0,rectUnavailable=0,sizeRejected=0,stateChanged=0;
                 var passMatches=new Dictionary<uint,bool>();
                 EnumWindows(delegate(IntPtr hwnd,IntPtr parameter)
                 {
@@ -965,14 +1101,30 @@ namespace DragonLauncher
                     {matches=ProcessMatches(pid,expected);passMatches[pid]=matches;}
                     if(!matches)return true;
                     verified++;
-                    if(IsWindowVisible(hwnd))visible++;else hidden++;
+                    bool visibleNow=IsWindowVisible(hwnd);
+                    if(visibleNow){visible++;if(IsIconic(hwnd))minimized++;}else hidden++;
                     int cloak;
                     if(DwmGetInt(hwnd,Cloaked,out cloak,sizeof(int))==0 && cloak!=0)cloaked++;
                     if(IsMainCandidate(hwnd,true))eligible++;
+                    else if(visibleNow){
+                        switch(DescribeCandidateExclusion(hwnd)){
+                            case CandidateExclusion.Owned:ownedRejected++;break;
+                            case CandidateExclusion.Child:childRejected++;break;
+                            case CandidateExclusion.Tool:toolRejected++;break;
+                            case CandidateExclusion.Cloaked:cloakedRejected++;break;
+                            case CandidateExclusion.RectUnavailable:rectUnavailable++;break;
+                            case CandidateExclusion.TooSmall:sizeRejected++;break;
+                            // A window can disappear, hide or become eligible
+                            // between read-only samples. Keep this uncertainty.
+                            default:stateChanged++;break;
+                        }
+                    }
                     return true;
                 },IntPtr.Zero);
                 return "verifiedWindows="+verified+"; visible="+visible+"; hidden="+hidden+
-                    "; cloaked="+cloaked+"; eligible="+eligible;
+                    "; cloaked="+cloaked+"; eligible="+eligible+"; minimized="+minimized+
+                    "; ownedRejected="+ownedRejected+"; childRejected="+childRejected+"; toolRejected="+toolRejected+
+                    "; cloakedRejected="+cloakedRejected+"; rectUnavailable="+rectUnavailable+"; sizeRejected="+sizeRejected+"; stateChanged="+stateChanged;
             }
             catch {return "targetAvailability=unavailable";}
         }
@@ -1111,7 +1263,7 @@ namespace DragonLauncher
         }
 
         /// <summary>
-        /// Raises/restores a verified target without changing its topmost style.
+        /// Raises an already prepared, non-minimized target without changing its topmost style.
         /// Foreground focus is best effort and may legitimately be denied by Windows.
         /// The caller must already have its own topmost overlay visible.
         /// </summary>
@@ -1119,8 +1271,7 @@ namespace DragonLauncher
         {
             try
             {
-                if (!IsVerified(target) || !IsMainCandidate(target, true)) return false;
-                if (IsIconic(target)) ShowWindowAsync(target, SwRestore);
+                if (!IsVerified(target) || !IsMainCandidate(target, false)) return false;
                 bool positioned = SetWindowPos(target, IntPtr.Zero, 0, 0, 0, 0,
                     SwpNoMove | SwpNoSize | SwpNoActivate | SwpNoOwnerZOrder | SwpAsyncWindowPos);
                 bool focused = finalFocus && SetForegroundWindow(target);

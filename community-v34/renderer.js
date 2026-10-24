@@ -94,6 +94,7 @@ html[data-codex-dragon-background="v1"] #root main[data-app-shell-main-surface="
 }
 
 html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[data-app-shell-main-surface="default"] > ._WorkspaceContent_yl8z4_2::before { background-color: transparent !important; }
+html[data-codex-dragon-background="v1"] #root [data-app-shell-frame="true"] > [data-app-shell-workspace-row="true"] > div[aria-hidden="true"]._PageSurface_yl8z4_2 { background-color: transparent !important; }
 /* Clear only verified footer decorations. Glass variables style the composer;
    menus and controls retain their native behavior. Removing the marker restores
    the client's original backgrounds without changing its DOM or layout. */
@@ -335,9 +336,33 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     notify();
   }
   const mainSelector = '#root main[data-app-shell-main-surface="default"]';
-  const shellComponents = ['Layout', 'Workspace', 'MainContentClip', 'LeftPanel', 'ApplicationMenuTopBar', 'FloatingHeader', 'MainContentTopFade'];
+  const shellComponents = ['Layout', 'Workspace', 'MainContentClip', 'LeftPanel', 'ApplicationMenuTopBar', 'FloatingHeader', 'MainContentTopFade', 'PageSurface', 'PageSurfaceLayout', 'ApplicationMenuPageSurfaceLayout'];
+  let layoutSurfaceKind = 'none';
+  function emptyLayoutAudit() {
+    // Fixed integers only. -1 means this branch was not examined, never zero.
+    // Collected from the same bounded semantic checks, with no new observer,
+    // frame callback, text reads, storage, URL, or extra periodic work.
+    return { layoutAuditFrameCount: -1, layoutAuditActiveFrameCount: -1,
+      layoutAuditAnyMainCount: -1, layoutAuditActiveAnyMainCount: -1,
+      layoutAuditPageSurfaceFrameCount: -1, layoutAuditLayoutTokenValid: -1,
+      layoutAuditPageLayoutTokenValid: -1, layoutAuditFrameHashMatches: -1,
+      layoutAuditPageSurfaceFlag: -1, layoutAuditDirectRowCount: -1,
+      layoutAuditDecorationCount: -1, layoutAuditDecorationValid: -1,
+      layoutAuditComposerCount: -1, layoutAuditComposerAmbiguous: -1 };
+  }
+  let layoutAudit = emptyLayoutAudit();
   let styleBinding = '', bindingMain = null, bindingCore = '', bindingComposer = '', bindingsDirty = true;
-  let boundShellNodes = [], watchedShellNodes = [];
+  let boundShellNodes = [], watchedShellNodes = [], boundStyleNodes = [], watchedStyleNodes = [], bindingAttributes = [];
+  const shellAttributeFilter = ['class', 'id', 'aria-hidden', 'data-app-shell-main-surface', 'data-app-shell-frame',
+    'data-app-shell-page-surface', 'data-app-shell-workspace-row', 'data-app-shell-main-content-top-fade',
+    'data-app-shell-left-panel-appearance', 'data-composer-surface-variant'];
+  function attributeSignature(node) { return shellAttributeFilter.map(name => node.getAttribute(name)); }
+  function cachedAttributesIntact() {
+    // Before attach the shell is revalidated without using this cache. Once
+    // attached, this snapshot closes the gap before observer dispatch. Never
+    // sample chat text, descendants, computed paint, or per-frame state.
+    return bindingAttributes.every(entry => entry.node.isConnected && entry.values.every((value, index) => value === entry.node.getAttribute(shellAttributeFilter[index])));
+  }
   function componentToken(node, name) {
     const prefix = '_' + name + '_';
     const tokens = String(node.className || '').split(/\s+/).filter(token => token.startsWith(prefix));
@@ -347,23 +372,25 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     const match = /^_[A-Za-z]+_([A-Za-z0-9]+)_([0-9]+)$/.exec(tokens[0]);
     return match ? { token: tokens[0], hash: match[1] } : null;
   }
-  function bindSurfaceStyle(main, workspace, mainToken, workspaceToken) {
-    const core = mainToken.token + ' ' + workspaceToken.token;
+  function bindSurfaceStyle(main, workspace, mainToken, workspaceToken, frameOnly = false) {
+    const core = (frameOnly ? 'frame ' : 'main ') + mainToken.token + ' ' + workspaceToken.token;
     // A composer may mount lazily below the unobserved conversation subtree.
     // Recheck its small semantic signature on existing surface/status checks;
     // never observe chat text or invalidate styles for ordinary token streaming.
     const composers = main.querySelectorAll('[data-composer-surface-variant]');
-    let composer = '';
-    if (composers.length > 16) { layoutReason = 'composer-ambiguous'; return false; }
+    let composer = ''; const composerNodes = [];
+    layoutAudit.layoutAuditComposerCount = Math.min(composers.length, 129);
+    layoutAudit.layoutAuditComposerAmbiguous = 0;
+    if (composers.length > 16) { layoutAudit.layoutAuditComposerAmbiguous = 1; layoutReason = 'composer-ambiguous'; return false; }
     for (const node of composers) {
       if (!['default', 'opaque', 'secondary'].includes(node.getAttribute('data-composer-surface-variant')) || node.closest('[data-app-shell-active-page="false"]')) continue;
       const actual = componentToken(node, 'ComposerLayoutRoot');
-      if (!actual || (composer && composer !== actual.token)) { layoutReason = 'composer-ambiguous'; return false; }
-      composer = actual.token;
+      if (!actual || (composer && composer !== actual.token)) { layoutAudit.layoutAuditComposerAmbiguous = 1; layoutReason = 'composer-ambiguous'; return false; }
+      composer = actual.token; composerNodes.push(node);
     }
-    if (!bindingsDirty && bindingMain === main && bindingCore === core && bindingComposer === composer) { layoutReason = 'ready'; return true; }
+    if (attached && !bindingsDirty && bindingMain === main && bindingCore === core && bindingComposer === composer && cachedAttributesIntact()) { layoutReason = 'ready'; return true; }
     layoutReason = 'shell-shape';
-    const bindings = { MainContentSurface: mainToken.token, WorkspaceContent: workspaceToken.token };
+    const bindings = frameOnly ? { Layout: mainToken.token } : { MainContentSurface: mainToken.token, WorkspaceContent: workspaceToken.token };
     if (composer) bindings.ComposerLayoutRoot = composer;
     const nodes = new Set(), spines = new Set(), containers = new Set([workspace]);
     let ancestor = main, depth = 0;
@@ -410,28 +437,100 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     const chrome = root.querySelectorAll('#app-shell-sidebar, [data-app-shell-left-panel-appearance]');
     if (chrome.length > 32) return false;
     for (const node of chrome) { if (node.closest('[data-app-shell-active-page="false"]')) continue; nodes.add(node); containers.add(node); if (!children(node)) return false; }
+    const attributeNodes = new Set([...spines, ...containers, ...composerNodes]);
     for (const node of nodes) {
       if (node.closest('[data-app-shell-active-page="false"]')) continue;
       for (const name of shellComponents) {
         if (!String(node.className || '').split(/\s+/).some(token => token.startsWith('_' + name + '_'))) continue;
         const actual = componentToken(node, name);
         if (!actual || actual.hash !== mainToken.hash || (bindings[name] && bindings[name] !== actual.token)) return false;
-        bindings[name] = actual.token;
+        bindings[name] = actual.token; attributeNodes.add(node);
       }
     }
+    if (attributeNodes.size > 128) return false;
     const signature = JSON.stringify(bindings);
     if (signature !== styleBinding) {
       // Change exact selectors only. All paint values and accessibility rules
       // remain byte-for-byte from the audited template; removal rolls back.
-      style.textContent = styleTemplate.replace(/_([A-Za-z]+)_(?:yl8z4|boifs)_2\b/g, (token, name) => bindings[name] || token);
+      let css = styleTemplate.replace(/_([A-Za-z]+)_(?:yl8z4|boifs)_2\b/g, (token, name) => bindings[name] || token);
+      if (frameOnly) {
+        // The audited shell also hosts home/settings pages without a main.
+        // Only this exact frame's composer and inert decoration are styled.
+        const frameSelector = '[data-app-shell-frame="true"].' + mainToken.token;
+        css = css.replace('main[data-app-shell-main-surface="default"] .', frameSelector + ' .');
+      }
+      style.textContent = css;
       styleBinding = signature;
     }
     bindingMain = main; bindingCore = core; bindingComposer = composer; bindingsDirty = false;
     boundShellNodes = [...spines, ...containers].filter(node => node !== root && !node.closest('[data-app-shell-active-page="false"]'));
+    boundStyleNodes = [...attributeNodes].filter(node => node !== root && !node.closest('[data-app-shell-active-page="false"]'));
+    bindingAttributes = boundStyleNodes.map(node => ({ node, values: attributeSignature(node) }));
     layoutReason = 'ready';
     return true;
   }
+  function supportedFrameSurface() {
+    // A default conversation main is not mounted on every official route.
+    // Require the independently audited outer frame + direct workspace row;
+    // never promote a generic main/body, or hide content on an unknown page.
+    const frames = root.querySelectorAll('[data-app-shell-frame="true"]');
+    layoutReason = 'frame-count';
+    layoutAudit.layoutAuditFrameCount = Math.min(frames.length, 129);
+    if (frames.length > 128) return null;
+    layoutAudit.layoutAuditActiveFrameCount = 0; layoutAudit.layoutAuditPageSurfaceFrameCount = 0;
+    let selected = null;
+    for (const frame of frames) {
+      if (frame.closest('[data-app-shell-active-page="false"]')) continue;
+      layoutAudit.layoutAuditActiveFrameCount++;
+      if (frame.getAttribute('data-app-shell-page-surface') === 'true') layoutAudit.layoutAuditPageSurfaceFrameCount++;
+      if (!selected) selected = frame;
+    }
+    if (!selected) { layoutReason = 'main-count'; return null; }
+    if (layoutAudit.layoutAuditActiveFrameCount !== 1) return null;
+    layoutReason = 'frame-token';
+    const token = componentToken(selected, 'Layout'), pageToken = componentToken(selected, 'PageSurfaceLayout');
+    layoutAudit.layoutAuditLayoutTokenValid = token ? 1 : 0;
+    layoutAudit.layoutAuditPageLayoutTokenValid = pageToken ? 1 : 0;
+    layoutAudit.layoutAuditFrameHashMatches = token && pageToken ? (token.hash === pageToken.hash ? 1 : 0) : -1;
+    layoutAudit.layoutAuditPageSurfaceFlag = selected.getAttribute('data-app-shell-page-surface') === 'true' ? 1 : 0;
+    if (selected.tagName !== 'DIV' || selected.getAttribute('data-app-shell-page-surface') !== 'true' || !token || !pageToken || pageToken.hash !== token.hash || selected.children.length > 128) return null;
+    layoutReason = 'frame-row';
+    let row = null, rowInvalid = false;
+    layoutAudit.layoutAuditDirectRowCount = 0;
+    for (const child of selected.children) {
+      if (child.getAttribute('data-app-shell-workspace-row') !== 'true') continue;
+      layoutAudit.layoutAuditDirectRowCount++;
+      if (row || child.tagName !== 'DIV' || child.children.length > 128) rowInvalid = true;
+      if (!row) row = child;
+    }
+    if (!row || rowInvalid) return null;
+    layoutReason = 'frame-shape';
+    // The official page-surface branch emits both PageSurfaceLayout and one
+    // inert PageSurface. A bare boot/login frame is not this contract.
+    let pageSurface = null;
+    const unknownMains = selected.querySelectorAll('main');
+    layoutAudit.layoutAuditAnyMainCount = Math.min(unknownMains.length, 129);
+    if (unknownMains.length > 128) return null;
+    layoutAudit.layoutAuditActiveAnyMainCount = 0;
+    for (const candidate of unknownMains) if (!candidate.closest('[data-app-shell-active-page="false"]')) layoutAudit.layoutAuditActiveAnyMainCount++;
+    if (layoutAudit.layoutAuditActiveAnyMainCount !== 0) return null;
+    layoutAudit.layoutAuditDecorationCount = 0; layoutAudit.layoutAuditDecorationValid = 0;
+    let decorationInvalid = false;
+    for (const child of row.children) {
+      if (!String(child.className || '').split(/\s+/).some(value => value.startsWith('_PageSurface_'))) continue;
+      layoutAudit.layoutAuditDecorationCount++;
+      const decoration = componentToken(child, 'PageSurface');
+      if (pageSurface || !decoration || decoration.hash !== token.hash || child.tagName !== 'DIV' || child.getAttribute('aria-hidden') !== 'true') decorationInvalid = true;
+      if (!pageSurface) pageSurface = child;
+    }
+    if (!pageSurface || decorationInvalid) return null;
+    layoutAudit.layoutAuditDecorationValid = 1;
+    if (!bindSurfaceStyle(selected, row, token, componentToken(pageSurface, 'PageSurface'), true)) return null;
+    layoutSurfaceKind = 'frame';
+    return selected;
+  }
   function supportedSurface() {
+    layoutSurfaceKind = 'none'; layoutAudit = emptyLayoutAudit();
     // The host authenticates the executable and application URL. Here require
     // the audited document shape; a framework's label is not a layout contract.
     if (!root.isConnected || document.getElementById('root') !== root) { layoutReason = 'root-missing'; return null; }
@@ -457,7 +556,10 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
       if (!actualWorkspace) return null;
       selected = main; selectedMain = actualMain; selectedWorkspace = actualWorkspace;
     }
-    return selected && bindSurfaceStyle(selected, selectedChild, selectedMain, selectedWorkspace) ? selected : null;
+    if (!selected) return supportedFrameSurface();
+    if (!bindSurfaceStyle(selected, selectedChild, selectedMain, selectedWorkspace)) return null;
+    layoutSurfaceKind = 'main';
+    return selected;
   }
   function supportedLayout() {
     return supportedSurface() !== null;
@@ -474,7 +576,7 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     surfaceTimer = null; layoutResumeNeeded = false;
     if (surfaceObserver) surfaceObserver.disconnect();
     if (routeObserver) routeObserver.disconnect();
-    surfaceObserver = routeObserver = null; watchedShellNodes = [];
+    surfaceObserver = routeObserver = null; watchedShellNodes = []; watchedStyleNodes = [];
   }
   function queueSurfaceCheck() {
     bindingsDirty = true;
@@ -495,16 +597,28 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     }
     if (!surfaceObserver) surfaceObserver = new MutationObserver(queueSurfaceCheck);
     const parents = new Set([root]);
+    // A new official frame can mount before its page-surface flag/classes are
+    // complete. Observe only bounded semantic DIV anchors so their later attrs
+    // can wake validation; observation alone never authorizes any styling.
+    const candidateFrames = root.querySelectorAll('[data-app-shell-frame="true"]');
+    const pendingFrames = candidateFrames.length <= 128 ? [...candidateFrames].filter(node =>
+      node.tagName === 'DIV' && !node.closest('[data-app-shell-active-page="false"]')) : [];
     // Validated shell spines only; text/markdown descendants are not observed.
-    const shells = [...boundShellNodes, ...document.querySelectorAll(mainSelector)];
+    const shells = [...boundShellNodes, ...document.querySelectorAll(mainSelector), ...pendingFrames];
     for (const shell of shells) {
       let node = shell, depth = 0;
       while (node && node !== root && depth++ < 24 && parents.size < 128) { parents.add(node); node = node.parentElement; }
     }
     const connected = [...parents].filter(node => node.isConnected);
-    if (connected.length === watchedShellNodes.length && connected.every((node, index) => node === watchedShellNodes[index])) return;
-    surfaceObserver.disconnect(); watchedShellNodes = connected;
-    for (const node of connected) surfaceObserver.observe(node, { childList: true });
+    const attributes = [...new Set([...boundStyleNodes, ...pendingFrames])].filter(node => node.isConnected).slice(0, 128);
+    if (connected.length === watchedShellNodes.length && connected.every((node, index) => node === watchedShellNodes[index]) &&
+        attributes.length === watchedStyleNodes.length && attributes.every((node, index) => node === watchedStyleNodes[index])) return;
+    surfaceObserver.disconnect(); watchedShellNodes = connected; watchedStyleNodes = attributes;
+    const observedAttributes = new Set(attributes);
+    for (const node of connected) surfaceObserver.observe(node, observedAttributes.has(node) ?
+      { childList: true, attributes: true, attributeFilter: shellAttributeFilter } : { childList: true });
+    // Decoration/composer nodes are exact validated targets, not subtree roots.
+    for (const node of attributes) if (!parents.has(node)) surfaceObserver.observe(node, { attributes: true, attributeFilter: shellAttributeFilter });
   }
 
   function ensureSurface() {
@@ -584,7 +698,7 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     const wallpaperApplied = markerApplied && style.isConnected && document.getElementById(styleId) === style &&
       document.documentElement.getAttribute(marker) === 'v1';
     return { ...playbackQuality(), videoWidth: video.videoWidth, videoHeight: video.videoHeight,
-      attached, playing: playing && !video.paused && !documentHidden, disposed, code, layoutSupported, layoutReason, mediaReady,
+      ...layoutAudit, attached, playing: playing && !video.paused && !documentHidden, disposed, code, layoutSupported, layoutReason, layoutSurfaceKind, mediaReady,
       wallpaperApplied, firstFrameConfirmed, prepared: mediaReady, revealed, manuallyPaused,
       probeOnly, documentHidden, stageVisible: stageVisible(), mediaTimeMs, betweenAppearances, dormant, memoryPressure,
       protocolVersion: 2, documentGeneration, mediaGeneration: generation, rendererClockMs: Math.floor(performance.now()), actualPhase: disposed || retired ? 'retired' : recoveryNeeded ? 'faulted' : dormant ? 'hibernating' : layoutSuspended ? 'paused' : code === 'resuming' ? 'resuming' : betweenAppearances ? 'gap' : manuallyPaused ? 'paused' : !mediaReady ? 'preparing' : !revealed ? 'prepared' : 'visible',

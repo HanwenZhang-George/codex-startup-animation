@@ -95,7 +95,7 @@ internal sealed class WallpaperSession {
     readonly CdpTransport cdp;readonly HostState state;readonly Configuration config;readonly bool isolated;string session;bool installed,disposed;int phase;
     readonly Func<WaitHandle,MemoryPressureMonitor> memoryFactory=MemoryPressureMonitor.Create;
     readonly Stopwatch preparationClock=Stopwatch.StartNew();volatile bool transportLost,targetLost;long observationStarted,observationReceived;MemoryPressureMonitor preparationMemory;
-    bool mediaAttachStarted,preparationPressured;
+    bool mediaAttachStarted,preparationPressured;int lossEvidenceMask;
     sealed class PreparationSuspended:Exception {}
     readonly PreparationSnapshotRecorder preparationSnapshots=new PreparationSnapshotRecorder();
     readonly RotationSnapshotRecorder rotationSnapshots=new RotationSnapshotRecorder();
@@ -113,7 +113,7 @@ internal sealed class WallpaperSession {
     void SetPhase(int next){if(phase==next)return;phase=next;PreparationDiagnostics.Record(phase,preparationClock.ElapsedMilliseconds,0);}
     const string Key="window.__codexDragonWallpaperV1";
     const string RootReady="(() => ({rootReady:!!document.getElementById('root'),bodyReady:!!document.body}))()";
-    const string LayoutObservation="(() => {const s=window.__codexDragonWallpaperV1.status(),m=document.querySelectorAll('#root main[data-app-shell-main-surface=\"default\"]');let active=0;for(let i=0;i<Math.min(m.length,129);i++)if(!m[i].closest('[data-app-shell-active-page=\"false\"]'))active++;return Object.assign(s,{layoutWindowElectron:document.documentElement.getAttribute('data-codex-window-type')==='electron',layoutMainCount:Math.min(m.length,129),layoutActiveMainCount:active});})()";
+    const string LayoutObservation="(() => {const s=window.__codexDragonWallpaperV1.status(),m=document.querySelectorAll('#root main[data-app-shell-main-surface=\"default\"]'),f=document.querySelectorAll('#root [data-app-shell-frame=\"true\"]');let active=0,activeFrames=0,rows=0;for(let i=0;i<Math.min(m.length,129);i++)if(!m[i].closest('[data-app-shell-active-page=\"false\"]'))active++;for(let i=0;i<Math.min(f.length,129);i++){if(f[i].closest('[data-app-shell-active-page=\"false\"]'))continue;activeFrames++;for(let k=0;k<Math.min(f[i].children.length,129);k++)if(f[i].children[k].getAttribute('data-app-shell-workspace-row')==='true')rows++;}return Object.assign(s,{layoutWindowElectron:document.documentElement.getAttribute('data-codex-window-type')==='electron',layoutMainCount:Math.min(m.length,129),layoutActiveMainCount:active,layoutFrameCount:Math.min(f.length,129),layoutActiveFrameCount:activeFrames,layoutWorkspaceRowCount:Math.min(rows,129)});})()";
     const string Preflight="(() => ({namespaceFree:!('__codexDragonWallpaperV1' in window),ownNodeCount:['codex-dragon-stage-v1','codex-dragon-file-v1','codex-dragon-style-v1'].filter(id=>document.getElementById(id)).length}))()";
     // The initial hidden stage belongs to the verified workspace surface and
     // is absolute. attach() later uses fixed positioning only for its 1px probe.
@@ -123,8 +123,15 @@ internal sealed class WallpaperSession {
     const string Cleanup="(() => ({apiPresent:'__codexDragonWallpaperV1' in window,ownNodeCount:['codex-dragon-stage-v1','codex-dragon-file-v1','codex-dragon-style-v1'].filter(id=>document.getElementById(id)).length,markerPresent:document.documentElement.getAttribute('data-codex-dragon-background')==='v1'}))()";
     internal WallpaperSession(CdpTransport transport,HostState status,Configuration settings,bool test){cdp=transport;state=status;config=settings;isolated=test;}
     void OnSignal(string kind,string eventSession){
-        if(kind=="transport-fault"){transportLost=true;state.Stale(kind);}
-        else if(session!=null&&eventSession==session){if(kind=="target-lost"){targetLost=true;state.Stale(kind);}state.Work.Set();}
+        if(kind=="transport-fault"){RecordLoss("transport-fault");transportLost=true;state.Stale(kind);}
+        else if(session!=null&&eventSession==session){if(kind=="target-lost"){RecordLoss(cdp.TargetLossKind==1?"target-detached":cdp.TargetLossKind==2?"target-crashed":cdp.TargetLossKind==3?"inspector-detached":"unknown");targetLost=true;state.Stale(kind);}state.Work.Set();}
+    }
+    void RecordLoss(string kind){
+        // Preserve a later crash notification after detach, but never emit an
+        // unbounded stream. At most one record per fixed reason for this session.
+        int bit=kind=="transport-fault"?1:kind=="target-detached"?2:kind=="target-crashed"?4:kind=="inspector-detached"?8:16;
+        for(;;){int old=Interlocked.CompareExchange(ref lossEvidenceMask,0,0);if((old&bit)!=0)return;if(Interlocked.CompareExchange(ref lossEvidenceMask,old|bit,old)==old)break;}
+        PreparationDiagnostics.RecordLoss(phase,preparationClock.ElapsedMilliseconds,kind,cdp.FaultCode,cdp.ProcessExitState);
     }
     internal static bool AcceptedTarget(Dictionary<string,object> target){
         string id=Json.Text(target,"targetId"),url=Json.Text(target,"url");if(Json.Text(target,"type")!="page"||!Regex.IsMatch(id??"","^[A-Za-z0-9_-]{1,128}$")||url==null||url.Length>8192)return false;
@@ -240,38 +247,48 @@ internal sealed class WallpaperSession {
         catch(HostFailure error){code=100+error.Code;stage=error.TimeoutStage;throw;}
         finally{PreparationDiagnostics.RecordTargetRequest(kind,request.ElapsedMilliseconds,budget,code,stage,cdp);}
     }
+    const int ColdTargetBudgetMilliseconds=30000,TargetReadBudgetMilliseconds=2000,SlowTargetReadBudgetMilliseconds=4000,TargetAttachBudgetMilliseconds=12000;
     void WaitForTarget(Stopwatch clock,int delay){
         var wait=Stopwatch.StartNew();
         // Bounded, non-spinning waits; do not consume control notifications.
         while(!Disabled&&!cdp.Faulted){
-            int left=Math.Min(Deadline.Remaining(12000,clock.ElapsedMilliseconds),Deadline.Remaining(delay,wait.ElapsedMilliseconds));
+            int left=Math.Min(Deadline.Remaining(ColdTargetBudgetMilliseconds,clock.ElapsedMilliseconds),Deadline.Remaining(delay,wait.ElapsedMilliseconds));
             if(left<=0)return;Thread.Sleep(Math.Min(50,left));
         }
     }
     void SelectTarget(){
-        var clock=Stopwatch.StartNew();string id=null;
-        while(clock.ElapsedMilliseconds<12000&&!Disabled){
+        // A cold official process may expose its page after the old 12-second
+        // discovery limit. This one absolute horizon includes every read, wait
+        // and the single attach; it never resets or changes the film's deadline.
+        var clock=Stopwatch.StartNew();string id=null;int readBudget=TargetReadBudgetMilliseconds;
+        while(clock.ElapsedMilliseconds<ColdTargetBudgetMilliseconds&&!Disabled){
             CheckPreparationResources();
-            int left=Deadline.Remaining(12000,clock.ElapsedMilliseconds);if(left<=0)break;
+            int left=Deadline.Remaining(ColdTargetBudgetMilliseconds,clock.ElapsedMilliseconds);if(left<=0)break;
             Dictionary<string,object> response;
-            try{response=TargetRequest(1,Json.Obj(),Math.Min(2000,left));}
+            try{response=TargetRequest(1,Json.Obj(),Math.Min(readBudget,left));}
             catch(HostFailure error){
                 // Only this idempotent discovery read can be replayed after a
                 // reply timeout. Pipe/write/protocol faults remain terminal.
                 if(error.Code!=37||error.TimeoutStage!=3||cdp.Faulted||Disabled||transportLost)throw;
-                if(Deadline.Remaining(12000,clock.ElapsedMilliseconds)<=0)throw;
+                if(Deadline.Remaining(ColdTargetBudgetMilliseconds,clock.ElapsedMilliseconds)<=0)throw;
+                // Repeating the same 2-second limit would discard every reply
+                // from a browser consistently taking slightly longer. Wait up
+                // to 4 seconds for the NEXT fresh request, never accept an old
+                // timed-out ID. A healthy reply resets the ordinary read limit.
+                readBudget=SlowTargetReadBudgetMilliseconds;
                 WaitForTarget(clock,200);continue;
             }
+            readBudget=TargetReadBudgetMilliseconds;
             var values=Json.Get(response,"targetInfos") as IEnumerable;if(values==null)throw new HostFailure(62);
             int found=0;foreach(var value in values){var target=value as Dictionary<string,object>;if(target!=null&&AcceptedTarget(target)){found++;id=Json.Text(target,"targetId");}}
             if(found>1)throw new HostFailure(62);if(found==1)break;WaitForTarget(clock,500);
         }
         CheckPreparationResources();
-        int remaining=Deadline.Remaining(12000,clock.ElapsedMilliseconds);
+        int remaining=Deadline.Remaining(ColdTargetBudgetMilliseconds,clock.ElapsedMilliseconds);
         if(id==null||Disabled||transportLost||remaining<=0)throw new HostFailure(62);
         // Attach mutates CDP state: issue it ONCE, using only the time left in
         // the same startup budget. A timeout must never attach a second time.
-        var attached=TargetRequest(2,Json.Obj("targetId",id,"flatten",true),remaining);session=Json.Text(attached,"sessionId");
+        var attached=TargetRequest(2,Json.Obj("targetId",id,"flatten",true),Math.Min(TargetAttachBudgetMilliseconds,remaining));session=Json.Text(attached,"sessionId");
         if(!Regex.IsMatch(session??"","^[A-Za-z0-9_-]{1,128}$"))throw new HostFailure(62);
     }
     void Prepare(){
