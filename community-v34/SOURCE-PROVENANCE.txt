@@ -1,3 +1,37 @@
+﻿R16 early-dismissal candidate (2026-10-25)
+Baseline: frozen CodexDragon-V34-Portable-Windows-x64-r15-test.zip.
+Baseline SHA-256: 92C2C0F215B9B78D6618BF2968EF5EF5090AFA81CC9394BE4BC1FBD207922A4C.
+All 194 baseline payloads were verified before extracting the isolated source.
+Changes address user animation dismissal, corresponding bounded diagnostics and
+synthetic regression coverage. Real feedback and developer outputs are private.
+No stable installation, official client, account/configuration, media bytes or
+published release was modified in preparing this candidate.
+
+Prior provenance retained below:
+R15 warm-start reliability candidate (2026-10-25)
+Baseline: frozen CodexDragon-V34-Portable-Windows-x64-r14-icon-test.zip.
+Baseline SHA-256: 4A139784355813A1617495DC125F9510AA0B086323DF83DA3A89D60E0D263C1A.
+All original manifest entries were verified before extracting this isolated source.
+The change concerns warm-start classification and bounded official activation,
+authenticated same-directory host continuity, explicit manual exit/retry guidance,
+fixed-allowlist diagnostic interpretation, and corresponding regression tests.
+No live installation, official client, account, private configuration, media bytes,
+renderer, or public release has been modified by preparing this candidate.
+End-user reports and developer test artifacts are excluded from the package.
+
+Prior provenance retained below:
+R14 registered-path compatibility candidate (2026-10-25)
+Base: freshly downloaded GitHub public R13 from the unchanged community-v34-r5 link.
+ZIP SHA-256: 1D817B93F879AB634A4F96F56665E751B018092A994087E13EF16B801540B884
+Source commit: 2a7a7e4fb4b2e8f417eca4027769bff8b9ded832
+All 185 baseline files verified; 114 embedded source files matched the fresh clone.
+Changes: scoped local registered-root alias resolution; fixed allowlisted identity
+reason/mode and root metadata diagnostics; compatibility/security regressions.
+All 46 media assets and renderer remain byte-identical to R13.
+No private installation, account, feedback report or runtime configuration copied.
+Not published: affected-machine acceptance remains required.
+
+Historical source provenance follows:
 R13 first-launch reliability candidate (2026-10-24)
 Built from sealed public R12 source archive, SHA-256:
 f8834701cf226f69aa6e40e6406373bc13967344d9184dc95be6f852f335cb62

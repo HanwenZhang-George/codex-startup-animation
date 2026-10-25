@@ -7,7 +7,7 @@ $sourceFull=[IO.Path]::GetFullPath($SourceRoot).TrimEnd('\','/')
 $outputFull=[IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\','/')
 if($outputFull -eq $sourceFull -or $outputFull.StartsWith($sourceFull+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Test artifacts must remain outside source project'}
 $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
-$sources=@('DragonLauncher.cs','CinematicScene.cs','StrokeTrace.cs','FilmSplash.cs','FilmSplashV2.cs','NativeHandoff.cs','PulseReveal.cs','EyeRig.cs','BridgeActivation.cs','StartupReliability.cs','NativeRestoreGuard.cs','OfficialIdentity.cs')
+$sources=@('DragonLauncher.cs','ExistingClientStartup.cs','CinematicScene.cs','StrokeTrace.cs','FilmSplash.cs','FilmSplashV2.cs','NativeHandoff.cs','PulseReveal.cs','EyeRig.cs','BridgeActivation.cs','StartupReliability.cs','NativeRestoreGuard.cs','OfficialIdentity.cs')
 $references=@('mscorlib.dll','System.dll','System.Core.dll','System.Configuration.dll','System.Drawing.dll','System.Runtime.Serialization.dll','System.Security.dll','System.Web.Extensions.dll','System.Windows.Forms.dll','System.Xaml.dll','System.Xml.dll','System.Xml.Linq.dll','WPF/PresentationCore.dll','WPF/PresentationFramework.dll','WPF/WindowsBase.dll')
 $fixtureDirectory=Join-Path $outputFull ('fixture-'+[Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($fixtureDirectory)

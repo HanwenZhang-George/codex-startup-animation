@@ -452,6 +452,8 @@ namespace DragonLauncher
         private double preImpactGateStarted = -1, rateUpdatedAt = -1, playbackRate = 1;
         private bool preImpactReleased;
         private bool livingFailed, userSkipped, resourceSkipped;
+        private bool sessionEnding;
+        private Application sessionApplication;
         private bool AnimationSkipped {get{return userSkipped || resourceSkipped;}}
         private double lastFocusAttempt = -1;
         private int focusAttempts;
@@ -486,14 +488,15 @@ namespace DragonLauncher
                     surface.Children.Add(new Viewbox {Stretch=Stretch.Uniform,IsHitTestVisible=false,Child=typography});
                 }catch(Exception error){Log("Optional terminal typography unavailable: "+error.GetType().Name);}
             }
-            cancel = new Button { Content = "×", FontSize = 24, Foreground = Brushes.LightBlue, Background = Brushes.Transparent, BorderThickness = new Thickness(0), Width = 48, Height = 48, Margin = new Thickness(0,10,14,0), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, ToolTip = "关闭动画（已准备的 Codex 会保留）", Focusable = false };
+            cancel = new Button { Content = "×", FontSize = 24, Foreground = Brushes.LightBlue, Background = Brushes.Transparent, BorderThickness = new Thickness(0), Width = 48, Height = 48, Margin = new Thickness(0,10,14,0), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top, ToolTip = "跳过动画，继续启动 Codex 和壁纸", Focusable = false };
             surface.Children.Add(cancel); Content = surface;
             watchdog = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(50) };
             handoffTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(16) };
             watchdog.Tick += OnWatchdog; handoffTimer.Tick += OnHandoffTick;
             player.MediaOpened += OnMediaOpened; player.MediaEnded += OnMediaEnded; player.MediaFailed += OnMediaFailed;
-            cancel.Click += OnCancel; PreviewKeyDown += OnPreviewKeyDown; ContentRendered += OnContentRendered; Closed += OnClosed;
-            SourceInitialized+=delegate { Log("Movie native show/hide transitions disabled="+NativeHandoff.DisableOwnTransitions(this)); };
+            cancel.Click += OnCancel; PreviewKeyDown += OnPreviewKeyDown; ContentRendered += OnContentRendered; Closing += OnClosing; Closed += OnClosed;
+            SourceInitialized+=delegate {ObserveSessionEnding();Log("Movie native show/hide transitions disabled="+NativeHandoff.DisableOwnTransitions(this));};
+            ObserveSessionEnding();
             SizeChanged+=OnMediaCoverSizeChanged;DpiChanged+=OnMediaCoverDpiChanged;
             // This UI heartbeat covers intro, compatibility waits and pulse
             // reveal. Playback timers intentionally stop before the reveal;
@@ -511,6 +514,23 @@ namespace DragonLauncher
             }
         }
         private void OnRecoveryHeartbeat(object sender,EventArgs e){if(!cleaned&&recoveryGuard!=null)recoveryGuard.Pulse();}
+        private void ObserveSessionEnding()
+        {
+            // Main constructs this Window before Application.Run creates its
+            // Application. SourceInitialized subscribes before an actual HWND
+            // can receive a user close or the Windows session-end broadcast.
+            if(sessionApplication!=null||Application.Current==null)return;
+            sessionApplication=Application.Current;sessionApplication.SessionEnding+=OnSessionEnding;
+        }
+        private void OnSessionEnding(object sender,SessionEndingCancelEventArgs e){sessionEnding=true;}
+        private void OnClosing(object sender,System.ComponentModel.CancelEventArgs e)
+        {
+            // Internal completion/failure sets done before Close. Only a direct
+            // user dismissal reaches this without intent. Publish the same skip
+            // intent here, but never call Close recursively from Closing.
+            if(e.Cancel||done||cleaned||preview||sessionEnding||Environment.HasShutdownStarted||Dispatcher.HasShutdownStarted)return;
+            ApplyAnimationSkip(false,"window-close");
+        }
         private void OnResourceTrip(string reason)
         {
             if(Interlocked.CompareExchange(ref activationClosed,0,0)!=0||Interlocked.CompareExchange(ref resourceTrip,1,0)!=0)return;
@@ -990,12 +1010,7 @@ namespace DragonLauncher
                 // topmost movie. Its final ordering is then set explicitly.
                 pulse.Topmost=false;
                 pulse.Left=Left;pulse.Top=Top;pulse.Width=ActualWidth;pulse.Height=ActualHeight;
-                pulse.RevealFinished+=delegate {CompleteHandoff();};pulse.Dismissed+=delegate {CancelHandoff();};
-                pulse.SkipRequested+=delegate {SkipAnimation();};
-                pulse.Closed+=delegate(object sender,EventArgs args){
-                    if(object.ReferenceEquals(pulse,sender))pulse=null;
-                    if(!done && !cleaned){pulsePreparationFailed=true;if(transitioning)CancelHandoff();}
-                };
+                pulse.RevealFinished+=delegate {CompleteHandoff();};BindPulseDismissal(pulse);
                 pulse.OpaqueCoverFailed+=delegate {
                     if(cleaned)return;
                     pulsePreparationFailed=true;
@@ -1083,7 +1098,6 @@ namespace DragonLauncher
                 "; replayExisting="+(settings.ReplayTarget!=null));Close();
             if(activationError!=null && preview && !quietErrors)MessageBox.Show("无法打开 Codex。请检查启动配置。\n\n"+activationError.Message,"Codex 启动器",MessageBoxButton.OK,MessageBoxImage.Error);
         }
-        private void CancelHandoff(){if(done)return;done=true;HandoffSucceeded=false;Log("Animation cancelled; restoring target placement");Close();}
         private void OnMediaEnded(object sender,RoutedEventArgs e)
         {
             if(done || transitioning)return;PlaybackSucceeded=true;playbackClock.Stop();
@@ -1099,12 +1113,33 @@ namespace DragonLauncher
             if(e.Key!=Key.Escape && e.Key!=Key.Enter && e.Key!=Key.Space)return;
             e.Handled=true;SkipAnimation();
         }
-        private void OnCancel(object sender,RoutedEventArgs e){e.Handled=true;if(!cleaned)Close();}
+        private void OnCancel(object sender,RoutedEventArgs e){e.Handled=true;SkipAnimationFrom("movie-button");}
+        private void OnPulseDismissed(object sender,EventArgs e){SkipAnimationFrom("pulse-button");}
+        private void BindPulseDismissal(PulseReveal overlay)
+        {
+            overlay.Dismissed+=OnPulseDismissed;
+            overlay.SkipRequested+=delegate {SkipAnimation();};
+            overlay.Closed+=OnPulseClosed;
+        }
+        private void OnPulseClosed(object sender,EventArgs e)
+        {
+            // The pulse is already closed. Relinquish it before closing the
+            // movie, so its cleanup never recursively closes the same window.
+            if(object.ReferenceEquals(pulse,sender))pulse=null;
+            if(!done&&!cleaned)SkipAnimationFrom("window-close");
+        }
         private void SkipAnimation(){SkipAnimationCore(false);}
         private void SkipAnimationCore(bool resourceProtection)
         {
-            if(done || cleaned)return;
-            if(preview){done=true;Close();return;}
+            if(ApplyAnimationSkip(resourceProtection,resourceProtection?"resource-protection":"keyboard"))Close();
+        }
+        private void SkipAnimationFrom(string source)
+        {if(ApplyAnimationSkip(false,source))Close();}
+        private bool ApplyAnimationSkip(bool resourceProtection,string source)
+        {
+            if(done || cleaned)return false;
+            if(preview){done=true;return true;}
+            if(sessionEnding||Environment.HasShutdownStarted||Dispatcher.HasShutdownStarted)return false;
             if(resourceProtection)resourceSkipped=true;else userSkipped=true;
             HandoffSucceeded=false;
             // Skipping the optional movie is not a failed wallpaper preparation.
@@ -1118,15 +1153,18 @@ namespace DragonLauncher
             // a reveal request is not proof of playback or a prior-disable override.
             EnsureActivation();
             if(targetPlacement!=null)targetPlacement.Commit();
+            int intent=Interlocked.CompareExchange(ref wallpaperRevealRequested,0,0);
+            Log("animation-skip source="+source+" wallpaperIntent="+(settings.ReplayTarget!=null?"preserve":!settings.WallpaperEnabled?"none":intent==1?"reveal":intent==-1?"disabled":"none")+
+                " activationRequested="+activationRequested);
             Log(resourceProtection ? "Startup animation released for resource protection; wallpaper preparation continues; no success finale" :
                 "Animation explicitly skipped; wallpaper preparation continues; no success finale");
-            done=true;Close();
+            done=true;return true;
         }
         private void LaunchClose()
         {
             if(done || transitioning)return;
             if(preview){done=true;Close();return;}
-            if(living!=null){SkipAnimation();return;}
+            if(living!=null){SkipAnimationFrom("compatibility-fallback");return;}
             if(settings.SmoothHandoff && shieldReady){BeginHandoff();return;}
             EnsureActivation();transitioning=true;ReleasePlayback();handoffClock.Start();handoffTimer.Tick+=OnCompatibilityWait;handoffTimer.Start();
         }
@@ -1148,6 +1186,7 @@ namespace DragonLauncher
         private void OnClosed(object sender,EventArgs e)
         {
             if(cleaned)return;cleaned=true;done=true;
+            if(sessionApplication!=null){sessionApplication.SessionEnding-=OnSessionEnding;sessionApplication=null;}
             preparation.Cancel();
             Interlocked.Exchange(ref activationClosed,1);
             if(resourceBreaker!=null){resourceBreaker.Dispose();resourceBreaker=null;}
@@ -1167,7 +1206,7 @@ namespace DragonLauncher
             }
             ReleasePlayback();handoffTimer.Tick-=OnHandoffTick;handoffTimer.Tick-=OnCompatibilityWait;
             clock.Stop();handoffClock.Stop();
-            cancel.Click-=OnCancel;PreviewKeyDown-=OnPreviewKeyDown;ContentRendered-=OnContentRendered;Closed-=OnClosed;
+            cancel.Click-=OnCancel;PreviewKeyDown-=OnPreviewKeyDown;ContentRendered-=OnContentRendered;Closing-=OnClosing;Closed-=OnClosed;
             SizeChanged-=OnMediaCoverSizeChanged;DpiChanged-=OnMediaCoverDpiChanged;
             Log("Cleanup complete: decoder, local pulse and timers released; no desktop shield");
             }

@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
+using Microsoft.Win32.SafeHandles;
 
 namespace CodexDragon.Official {
     public sealed class OfficialIdentitySnapshot : IDisposable {
@@ -36,6 +37,26 @@ namespace CodexDragon.Official {
         internal sealed class IdentityLease { internal string Key,Package,Executable,Hash;internal FileStream File,Manifest;internal int References; }
         private static InvalidOperationException Failure(string code) { return new InvalidOperationException(code); }
 
+        // Keep diagnostics finite and independent of exception text/paths.
+        public static string DiagnosticReason(Exception error) {
+            if(error is UnauthorizedAccessException)return "path-access-denied";
+            if(error is FileNotFoundException||error is DirectoryNotFoundException)return "path-missing";
+            if(!(error is InvalidOperationException))return "unknown";
+            switch(error.Message){
+                case "official-file-missing":return "path-missing";
+                case "official-manifest-path-invalid":case "official-registered-root-invalid":
+                case "official-registered-root-target-unsupported":return "path-invalid";
+                case "official-path-access-denied":return "path-access-denied";
+                case "official-linked-path-rejected":case "official-registered-root-link-limit":return "path-reparse";
+                case "official-path-metadata-unavailable":return "path-metadata-unavailable";
+                case "official-package-identity-invalid":case "official-manifest-too-large":case "official-manifest-identity-invalid":
+                case "official-application-ambiguous":case "official-executable-size-invalid":return "manifest";
+            }
+            switch(DiagnosticCode(error)){
+                case 10:return "registration";case 12:return "signature";case 13:return "process";default:return "unknown";
+            }
+        }
+
         // Stable, allowlisted diagnostics. Never return paths, signer details,
         // process command lines, exception messages or package versions.
         public static int DiagnosticCode(Exception error) {
@@ -47,7 +68,10 @@ namespace CodexDragon.Official {
                 case "official-registration-changing":return 10;
                 case "official-manifest-path-invalid":case "official-file-missing":case "official-linked-path-rejected":
                 case "official-package-identity-invalid":case "official-manifest-too-large":case "official-manifest-identity-invalid":
-                case "official-application-ambiguous":case "official-executable-size-invalid":return 11;
+                case "official-application-ambiguous":case "official-executable-size-invalid":
+                case "official-registered-root-invalid":case "official-registered-root-target-unsupported":
+                case "official-path-access-denied":case "official-path-metadata-unavailable":
+                case "official-registered-root-link-limit":return 11;
                 case "official-signature-invalid":case "official-signer-mismatch":case "official-signature-verifier-busy":
                 case "official-signature-verification-timeout":return 12;
                 case "official-running-unverifiable":case "official-process-generation-mismatch":
@@ -87,8 +111,135 @@ namespace CodexDragon.Official {
             if(!path.StartsWith(boundary,StringComparison.OrdinalIgnoreCase)||!String.Equals(Path.GetExtension(path),".exe",StringComparison.OrdinalIgnoreCase))throw Failure("official-manifest-path-invalid");return path;
         }
         private static void Regular(string path) {
-            if(!Path.IsPathRooted(path)||path.StartsWith(@"\\",StringComparison.Ordinal)||!File.Exists(path))throw Failure("official-file-missing");
-            for(string part=Path.GetFullPath(path);!String.IsNullOrEmpty(part);part=Path.GetDirectoryName(part))if((File.GetAttributes(part)&FileAttributes.ReparsePoint)!=0)throw Failure("official-linked-path-rejected");
+            if(!Path.IsPathRooted(path)||path.StartsWith(@"\\",StringComparison.Ordinal))throw Failure("official-file-missing");
+            var chain=new List<string>();
+            for(string part=Path.GetFullPath(path);!String.IsNullOrEmpty(part);part=Path.GetDirectoryName(part)){
+                if(chain.Count>=64)throw Failure("official-manifest-path-invalid");chain.Add(part);
+            }
+            // Never probe a child (including File.Exists) before ruling out a
+            // reparse ancestor. A rejected child link must not contact its target.
+            for(int i=chain.Count-1;i>=0;i--){
+                FileAttributes attributes;
+                try{attributes=File.GetAttributes(chain[i]);}
+                catch(FileNotFoundException){throw Failure("official-file-missing");}
+                catch(DirectoryNotFoundException){throw Failure("official-file-missing");}
+                catch(UnauthorizedAccessException){throw Failure("official-path-access-denied");}
+                if((attributes&FileAttributes.ReparsePoint)!=0)throw Failure("official-linked-path-rejected");
+                if(i==0?(attributes&FileAttributes.Directory)!=0:(attributes&FileAttributes.Directory)==0)throw Failure("official-file-missing");
+            }
+        }
+        // This exception to the ordinary no-links policy is ONLY called for a
+        // package root returned by Windows registration. Files beneath that root
+        // still pass ReadPackage/Regular and the existing publisher verification.
+        // Local aliases are resolved one component at a time without following
+        // unknown/remote reparse targets. Only aliases require a read lease:
+        // metadata-only handles cannot prevent reparse-data replacement.
+        internal sealed class RegisteredRootLease : IDisposable {
+            internal string Path;
+            readonly List<SafeFileHandle> handles=new List<SafeFileHandle>();
+            internal RegisteredRootLease(string input) {
+                try{Path=Resolve(input);}catch{Dispose();throw;}
+            }
+            string Resolve(string input) {
+                string current=LocalDosPath(input);var visited=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                int aliases=0;
+                for(;;){
+                    if(!visited.Add(current))throw Failure("official-registered-root-link-limit");
+                    string root=System.IO.Path.GetPathRoot(current),tail=current.Substring(root.Length);
+                    string[] parts=tail.Length==0?new string[0]:tail.Split('\\');
+                    if(parts.Length>64)throw Failure("official-registered-root-invalid");
+                    string prefix=root;bool redirected=false;
+                    for(int i=-1;i<parts.Length;i++){
+                        if(i>=0)prefix=System.IO.Path.Combine(prefix,parts[i]);
+                        // Preserve R13's access requirement on ordinary paths.
+                        // Protected Store ancestors can allow attribute queries
+                        // while denying even a zero-access directory handle.
+                        FileAttributes observed;
+                        try{observed=File.GetAttributes(prefix);}
+                        catch(FileNotFoundException){throw Failure("official-file-missing");}
+                        catch(DirectoryNotFoundException){throw Failure("official-file-missing");}
+                        catch(UnauthorizedAccessException){throw Failure("official-path-access-denied");}
+                        if((observed&FileAttributes.Directory)==0)throw Failure("official-registered-root-invalid");
+                        if((observed&FileAttributes.ReparsePoint)==0)continue;
+                        if(handles.Count>=256)throw Failure("official-registered-root-link-limit");
+                        var handle=CreateFile(prefix,0,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+                        if(handle.IsInvalid){int code=Marshal.GetLastWin32Error();handle.Dispose();ThrowPathError(code);}
+                        handles.Add(handle);
+                        AttributeTag attributes;
+                        if(!GetFileInformationByHandleEx(handle,9,out attributes,8))ThrowPathError(Marshal.GetLastWin32Error());
+                        if((attributes.Attributes&0x10)==0)throw Failure("official-registered-root-invalid");
+                        if((attributes.Attributes&0x400)==0)throw Failure("official-registration-changing");
+                        if(attributes.Tag!=0xA0000003&&attributes.Tag!=0xA000000C)throw Failure("official-registered-root-target-unsupported");
+                        if(++aliases>8)throw Failure("official-registered-root-link-limit");
+                        // Directory data-read access participates in share-mode
+                        // checks. Keep this lease until ReadPackage finishes;
+                        // unrelated ordinary ancestors need no directory handle.
+                        var alias=CreateFile(prefix,0x80000000,1,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+                        if(alias.IsInvalid){int code=Marshal.GetLastWin32Error();alias.Dispose();ThrowPathError(code);}
+                        handles.Add(alias);AttributeTag locked;
+                        if(!GetFileInformationByHandleEx(alias,9,out locked,8))ThrowPathError(Marshal.GetLastWin32Error());
+                        if(locked.Attributes!=attributes.Attributes||locked.Tag!=attributes.Tag)throw Failure("official-registration-changing");
+                        string target=ReadLocalLink(alias,locked.Tag,prefix);
+                        for(int rest=i+1;rest<parts.Length;rest++)target=System.IO.Path.Combine(target,parts[rest]);
+                        current=LocalDosPath(target);redirected=true;break;
+                    }
+                    if(redirected)continue;
+                    // Every component is now an ordinary local directory. The
+                    // known alias targets are locked; direct paths make no new
+                    // handle-access demand on WindowsApps or package folders.
+                    return current;
+                }
+            }
+            static string ReadLocalLink(SafeFileHandle handle,uint tag,string prefix) {
+                if(tag!=0xA0000003&&tag!=0xA000000C)throw Failure("official-registered-root-target-unsupported");
+                byte[] data=new byte[16384];uint returned;
+                if(!DeviceIoControl(handle,0x000900A8,IntPtr.Zero,0,data,(uint)data.Length,out returned,IntPtr.Zero))ThrowPathError(Marshal.GetLastWin32Error());
+                return ParseLocalLink(tag,data,checked((int)returned),prefix);
+            }
+            internal static string ParseLocalLink(uint tag,byte[] data,int returned,string prefix) {
+                if(tag!=0xA0000003&&tag!=0xA000000C)throw Failure("official-registered-root-target-unsupported");
+                int start=tag==0xA0000003?16:20;
+                if(data==null||returned<start||returned>data.Length||returned>16384||BitConverter.ToUInt32(data,0)!=tag||BitConverter.ToUInt16(data,4)+8>returned)throw Failure("official-registered-root-invalid");
+                int offset=BitConverter.ToUInt16(data,8),bytes=BitConverter.ToUInt16(data,10),declared=BitConverter.ToUInt16(data,4)+8;
+                if((offset&1)!=0||(bytes&1)!=0||bytes==0||start+offset+bytes>declared||start+offset+bytes>returned)throw Failure("official-registered-root-invalid");
+                string target=Encoding.Unicode.GetString(data,start+offset,bytes);
+                bool relative=tag==0xA000000C&&(BitConverter.ToUInt32(data,16)&1)!=0;
+                if(tag==0xA000000C&&(BitConverter.ToUInt32(data,16)&~1U)!=0)throw Failure("official-registered-root-invalid");
+                if(relative){
+                    if(System.IO.Path.IsPathRooted(target)||target.IndexOf(':')>=0)throw Failure("official-registered-root-target-unsupported");
+                    target=System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(prefix),target));
+                }else if(target.StartsWith(@"\??\",StringComparison.Ordinal))target=target.Substring(4);
+                return LocalDosPath(target);
+            }
+            internal static string LocalDosPath(string input) {
+                if(String.IsNullOrEmpty(input)||input.Length>4095)throw Failure("official-registered-root-invalid");
+                if(input.StartsWith(@"\\?\",StringComparison.Ordinal))input=input.Substring(4);
+                if(input.Length<3||!((input[0]>='A'&&input[0]<='Z')||(input[0]>='a'&&input[0]<='z'))||input[1]!=':'||input[2]!='\\'||input.IndexOf(':',2)>=0)
+                    throw Failure("official-registered-root-target-unsupported");
+                foreach(char character in input)if(character<32||character=='\x7f'||character=='/'||character=='"'||character=='*'||character=='?'||character=='<'||character=='>'||character=='|')throw Failure("official-registered-root-invalid");
+                string path=System.IO.Path.GetFullPath(input),root=System.IO.Path.GetPathRoot(path);
+                path=path.Length>root.Length?path.TrimEnd('\\'):path;
+                string original=input.Length>root.Length?input.TrimEnd('\\'):input;
+                if(!String.Equals(path,original,StringComparison.OrdinalIgnoreCase))throw Failure("official-registered-root-invalid");
+                foreach(string component in path.Substring(root.Length).Split('\\'))if(component=="."||component==".."||component.EndsWith(".",StringComparison.Ordinal)||component.EndsWith(" ",StringComparison.Ordinal))throw Failure("official-registered-root-invalid");
+                DriveType drive=new DriveInfo(root).DriveType;
+                if(drive!=DriveType.Fixed&&drive!=DriveType.Removable)throw Failure("official-registered-root-target-unsupported");
+                return path;
+            }
+            static void ThrowPathError(int code) {
+                if(code==2||code==3)throw Failure("official-file-missing");
+                if(code==5)throw Failure("official-path-access-denied");
+                throw Failure("official-path-metadata-unavailable");
+            }
+            public void Dispose(){foreach(var handle in handles)handle.Dispose();handles.Clear();}
+        }
+        internal static PackageRecord ReadRegisteredPackage(string fullName,string registeredRoot) {
+            using(var lease=new RegisteredRootLease(registeredRoot))return ReadPackage(fullName,lease.Path);
+        }
+        // Read-only diagnostic bridge. Callers obtain the input from native
+        // current-user registration; they must never serialize this private path.
+        public static string ResolveRegisteredRootForProbe(string registeredRoot) {
+            using(var lease=new RegisteredRootLease(registeredRoot))return lease.Path;
         }
         internal static PackageRecord ReadPackage(string fullName,string root) {
             Version version=PackageVersion(fullName);if(version==null)throw Failure("official-package-identity-invalid");
@@ -128,7 +279,7 @@ namespace CodexDragon.Official {
                         string name=Marshal.PtrToStringUni(value,lengthInBuffer);if(PackageVersion(name)==null)continue;
                         uint length=0;if(GetPackagePathByFullName(name,ref length,null)!=122||length<2||length>32768)throw Failure("official-package-path-unavailable");
                         var path=new StringBuilder((int)length);if(GetPackagePathByFullName(name,ref length,path)!=0)throw Failure("official-package-path-unavailable");
-                        records.Add(ReadPackage(name,path.ToString()));
+                        records.Add(ReadRegisteredPackage(name,path.ToString()));
                     }
                     return records;
                 }finally{Marshal.FreeHGlobal(names);Marshal.FreeHGlobal(buffer);}
@@ -260,6 +411,10 @@ namespace CodexDragon.Official {
         [DllImport("kernel32.dll")]private static extern bool ProcessIdToSessionId(uint pid,out uint session);
         [DllImport("kernel32.dll")]private static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode)]private static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder image,ref uint size);
+        [StructLayout(LayoutKind.Sequential)]private struct AttributeTag{internal uint Attributes,Tag;}
+        [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]private static extern SafeFileHandle CreateFile(string path,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
+        [DllImport("kernel32.dll",SetLastError=true)]private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle,int kind,out AttributeTag information,uint bytes);
+        [DllImport("kernel32.dll",SetLastError=true)]private static extern bool DeviceIoControl(SafeFileHandle handle,uint control,IntPtr input,uint inputBytes,byte[] output,uint outputBytes,out uint returned,IntPtr overlapped);
         [DllImport("wintrust.dll",ExactSpelling=true,PreserveSig=true)]private static extern int WinVerifyTrust(IntPtr window,ref Guid action,ref TrustData data);
     }
 }

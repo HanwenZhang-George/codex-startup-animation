@@ -124,6 +124,8 @@ namespace CodexDragonPublic {
             }catch(Exception error){
                 if(error is InvalidOperationException&&error.Message=="PUBLIC_OFFICIAL_RUNTIME_UNSUPPORTED")throw;
                 int diagnostic=CodexDragon.Official.OfficialIdentityResolver.DiagnosticCode(error);
+                Record("PUBLIC_IDENTITY_DETAIL reason="+CodexDragon.Official.OfficialIdentityResolver.DiagnosticReason(error)+
+                    " mode="+(readOnly?"check":(configure?"configure":"launch")));
                 throw new InvalidOperationException(diagnostic==10?"PUBLIC_OFFICIAL_DISCOVERY_FAILED":"PUBLIC_OFFICIAL_IDENTITY_REJECTED");
             }
             if(readOnly)return replay;

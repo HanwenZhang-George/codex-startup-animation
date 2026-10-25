@@ -51,24 +51,78 @@ function ConvertTo-CodexCompatibilityRecord([object]$PackageName,[object]$Marker
     return [pscustomobject][ordered]@{version=$version;architecture=$arch;readState=$ReadState;runtimeEvidence=$classification;markers=[pscustomobject]$evidence;manifest=(Get-CodexProbeManifest $ManifestText)}
 }
 
-function Test-CodexProbeLocalPath([string]$Path) {
+function Get-CodexProbePathReason([string]$Path) {
     try {
-        if($Path.Length -gt 4096 -or $Path -cnotmatch '\A[A-Za-z]:\\' -or $Path.Substring(2).Contains(':')){return $false}
-        $full=[IO.Path]::GetFullPath($Path);if($full.TrimEnd('\') -ine $Path.TrimEnd('\')){return $false}
+        if($Path.Length -gt 4096 -or $Path -cnotmatch '\A[A-Za-z]:\\' -or $Path.Substring(2).Contains(':')){return 'invalid-path'}
+        $full=[IO.Path]::GetFullPath($Path);if($full.TrimEnd('\') -ine $Path.TrimEnd('\')){return 'invalid-path'}
         $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($full))
-        if($drive.DriveType -notin @([IO.DriveType]::Fixed,[IO.DriveType]::Removable)){return $false}
+        if($drive.DriveType -notin @([IO.DriveType]::Fixed,[IO.DriveType]::Removable)){return 'unsupported-drive'}
         $chain=[Collections.Generic.List[string]]::new()
         for($cursor=$full;$cursor;$cursor=[IO.Path]::GetDirectoryName($cursor)){
-            if($chain.Count -ge 64){return $false};$chain.Add($cursor)
+            if($chain.Count -ge 64){return 'invalid-path'};$chain.Add($cursor)
         }
         # Check ancestors before descendants: probing the child first could
         # already follow a junction before discovering its reparse ancestor.
         for($i=$chain.Count-1;$i -ge 0;$i--){
-            try{$attributes=[IO.File]::GetAttributes($chain[$i])}catch [IO.FileNotFoundException]{return $true}catch [IO.DirectoryNotFoundException]{return $true}
-            if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){return $false}
+            try{$attributes=[IO.File]::GetAttributes($chain[$i])}catch [IO.FileNotFoundException]{return 'missing'}catch [IO.DirectoryNotFoundException]{return 'missing'}
+            if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){return 'reparse'}
         }
-        return $true
-    } catch {return $false}
+        return 'ok'
+    } catch [UnauthorizedAccessException] {return 'access-denied'}
+      catch [Security.SecurityException] {return 'access-denied'}
+      catch {return 'metadata-unavailable'}
+}
+function Test-CodexProbeLocalPath([string]$Path) {
+    return (Get-CodexProbePathReason $Path) -cin @('ok','missing')
+}
+
+# Reuse the runtime's scoped local-alias resolver. Loading verified assembly bytes
+# does not invoke Main, create a process, validate a signature or control Codex.
+# Standalone/older diagnostic fixtures simply retain the strict direct-path probe.
+function Get-CodexProbeResolver([string]$PackageRoot) {
+    try {
+        $exe=[IO.Path]::Combine($PackageRoot,'Launch.exe');$manifest=[IO.Path]::Combine($PackageRoot,'release-manifest.json')
+        if((Get-CodexProbePathReason $exe) -cne 'ok' -or (Get-CodexProbePathReason $manifest) -cne 'ok'){return $null}
+        if(([IO.FileInfo]::new($exe)).Length -gt 16777216 -or ([IO.FileInfo]::new($manifest)).Length -gt 262144){return $null}
+        $records=@((ConvertFrom-Json ([IO.File]::ReadAllText($manifest))).files | Where-Object {$_.path -ceq 'Launch.exe'})
+        if($records.Count -ne 1 -or $records[0].sha256 -cnotmatch '\A[0-9A-Fa-f]{64}\z'){return $null}
+        $bytes=[IO.File]::ReadAllBytes($exe);if($bytes.Length -ne $records[0].bytes){return $null}
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{$hash=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','')}finally{$sha.Dispose()}
+        if($hash -ine $records[0].sha256){return $null}
+        $assembly=[Reflection.Assembly]::Load($bytes)
+        $type=$assembly.GetType('CodexDragon.Official.OfficialIdentityResolver',$false)
+        if($null -eq $type){return $null}
+        $resolve=$type.GetMethod('ResolveRegisteredRootForProbe');$reason=$type.GetMethod('DiagnosticReason')
+        if($null -eq $resolve -or $null -eq $reason){return $null}
+        return [pscustomobject]@{resolve=$resolve;reason=$reason}
+    }catch{return $null}
+}
+function Read-CodexRegisteredProbePackage([string]$PackageName,[string]$Root,[Diagnostics.Stopwatch]$Clock,[int]$BudgetMilliseconds,$Resolver) {
+    $reason=Get-CodexProbePathReason $Root;$kind='direct';$resolved=$Root
+    $extendedLocal=$Root -cmatch '\A\\\\\?\\[A-Za-z]:\\'
+    if(($reason -cin @('reparse','access-denied') -or ($reason -ceq 'invalid-path' -and $extendedLocal)) -and $null -ne $Resolver -and $Clock.ElapsedMilliseconds -lt $BudgetMilliseconds){
+        try {
+            $resolved=[string]$Resolver.resolve.Invoke($null,@($Root))
+            $comparisonRoot=if($extendedLocal){$Root.Substring(4)}else{$Root}
+            $kind=if($resolved.TrimEnd('\') -ine $comparisonRoot.TrimEnd('\')){'registered-alias'}else{'direct'}
+            $reason=Get-CodexProbePathReason $resolved
+        }catch{
+            $errorObject=$_.Exception
+            while($null -ne $errorObject.InnerException){$errorObject=$errorObject.InnerException}
+            $detail='unknown';try{$detail=[string]$Resolver.reason.Invoke($null,@($errorObject))}catch{}
+            $reason=switch -CaseSensitive ($detail){'path-missing' {'missing'} 'path-invalid' {'invalid-path'} 'path-access-denied' {'access-denied'} 'path-reparse' {'reparse'} default {'metadata-unavailable'}}
+            $kind='unknown'
+        }
+    }
+    if($reason -cne 'ok'){
+        $record=ConvertTo-CodexCompatibilityRecord $PackageName @{} $null 'blocked-root'
+    }else{$record=Read-CodexProbePackage $PackageName $resolved $Clock $BudgetMilliseconds}
+    if($null -ne $record){
+        Add-Member -InputObject $record -NotePropertyName rootPathReason -NotePropertyValue $reason
+        Add-Member -InputObject $record -NotePropertyName rootPathKind -NotePropertyValue $(if($reason -ceq 'ok'){$kind}else{'unknown'})
+    }
+    return $record
 }
 
 function Read-CodexProbePackage([string]$PackageName,[string]$Root,[Diagnostics.Stopwatch]$Clock,[int]$BudgetMilliseconds) {
@@ -155,11 +209,16 @@ function Get-CodexCompatibilityInventory([ValidateRange(200,3000)][int]$BudgetMi
         if($clock.ElapsedMilliseconds -lt $BudgetMilliseconds){Initialize-CodexProbeNative}
         if($clock.ElapsedMilliseconds -lt $BudgetMilliseconds){
             $registered=[CodexDragonCompatibilityV1Native]::Enumerate();$result.registrationState=$registered.Status;$result.registeredPackageCount=$registered.Count;$result.packageCountCapped=$registered.Capped
+            $resolver=$null;$resolverChecked=$false
             foreach($name in $registered.Names){
                 if($clock.ElapsedMilliseconds -ge $BudgetMilliseconds){break}
                 if($null -eq (ConvertTo-CodexCompatibilityRecord $name @{} $null)){continue}
                 $path=[CodexDragonCompatibilityV1Native]::Root($name)
-                if([string]::IsNullOrEmpty($path)){$record=ConvertTo-CodexCompatibilityRecord $name @{} $null 'unavailable'}else{$record=Read-CodexProbePackage $name $path $clock $BudgetMilliseconds}
+                if(-not $resolverChecked -and -not [string]::IsNullOrEmpty($path) -and ((Get-CodexProbePathReason $path) -cin @('reparse','access-denied') -or $path -cmatch '\A\\\\\?\\[A-Za-z]:\\')){
+                    $resolverChecked=$true
+                    if($clock.ElapsedMilliseconds -lt $BudgetMilliseconds){$resolver=Get-CodexProbeResolver $PSScriptRoot}
+                }
+                if([string]::IsNullOrEmpty($path)){$record=ConvertTo-CodexCompatibilityRecord $name @{} $null 'unavailable'}else{$record=Read-CodexRegisteredProbePackage $name $path $clock $BudgetMilliseconds $resolver}
                 if($null -ne $record){$result.packages+= $record}
             }
         }

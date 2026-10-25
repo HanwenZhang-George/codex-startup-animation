@@ -376,7 +376,25 @@ namespace DragonLauncher
                     }
                     try
                     {
-                        if(replayExisting){
+                        // The parent's replay flag is only a momentary hint.
+                        // Reclassify every real official entry before any cover
+                        // or input guard, including an app that opened meanwhile.
+                        if(ExistingClientStartup.ShouldCoordinate(config,preview)){
+                            var warm=ExistingClientStartup.Resolve(config,root,message=>LauncherDiagnostics.Write("handoff-latest.log",message));
+                            if(warm.Decision==WarmStartupDecision.Cancelled)return 77;
+                            if(warm.Decision==WarmStartupDecision.Unavailable){
+                                System.Windows.MessageBox.Show("未能在限定时间内安全取得可用的 Codex 窗口或壁纸会话。\n\n"+
+                                    "本次已停止自动尝试，没有关闭或终止 Codex，也不会重复发送启动请求。若刚才的系统激活稍后完成，Codex 仍可正常使用。\n\n"+
+                                    "请检查 Codex 状态，必要时运行本包 Diagnostics 文件夹的一键诊断。原因："+warm.Reason,
+                                    "Codex 启动动画",System.Windows.MessageBoxButton.OK,System.Windows.MessageBoxImage.Information);
+                                return 76;
+                            }
+                            if(warm.Decision==WarmStartupDecision.Replay){
+                                config=config.WithExistingReplay(warm.Target);
+                                RecordStartupStage("replay-existing-window-pinned",startupTimer);
+                            }
+                        }
+                        else if(replayExisting){
                             var existing=ExistingReplayTarget.Find(config,root,message=>LauncherDiagnostics.Write("handoff-latest.log",message));
                             if(existing==null){
                                 RecordStartupStage("replay-target-unavailable-no-activation",startupTimer);

@@ -104,6 +104,22 @@ function Add-FixExceptionFields($Fields,[string]$Body) {
 }
 function Convert-FixHandoff([string]$Body,[string]$Utc) {
     $fields=[ordered]@{utc=$Utc}
+    if($Body.StartsWith('animation-skip source=',[StringComparison]::Ordinal)){
+        $fields.category='animation-skip'
+        $fields.source=Get-FixEventEnum $Body 'source' @('keyboard','movie-button','pulse-button','window-close','resource-protection','compatibility-fallback')
+        $fields.wallpaperIntent=Get-FixEventEnum $Body 'wallpaperIntent' @('reveal','disabled','preserve','none')
+        $fields.activationRequested=Get-FixEventBoolean $Body 'activationRequested'
+        return [pscustomobject]$fields
+    }
+    if($Body.StartsWith('warm-start decision=',[StringComparison]::Ordinal)){
+        $fields.category='warm-start'
+        $fields.decision=Get-FixEventEnum $Body 'decision' @('cold','replay','activate','needs-exit','cancelled','unavailable')
+        $fields.reason=Get-FixEventEnum $Body 'reason' @('no-running','existing-window','window-recovered','no-window','activation-timeout','activation-failed','window-timeout','observation-timeout','identity-unavailable','target-ended','host-unavailable','manual-retry-running','manual-retry-cold','user-cancelled','animation-only')
+        $fields.elapsedMs=Get-FixEventNumber $Body 'elapsedMs' 31536000000 0
+        $fields.activationCount=Get-FixEventNumber $Body 'activationCount' 1 0
+        $fields.hostState=Get-FixEventEnum $Body 'hostState' @('unchecked','unavailable','unverified','managed','disabled','paused','faulted','animation-only')
+        return [pscustomobject]$fields
+    }
     if($Body.StartsWith('Startup resource protection: ',[StringComparison]::Ordinal)){
         $value=$Body.Substring('Startup resource protection: '.Length)
         $reason=if($value -cin @('system-memory-pressure','system-commit-pressure','wallpaper-commit-pressure','startup-private-memory-limit','startup-sustained-cpu-limit','startup-resource-monitor-unavailable')){$value}else{'unknown'}
@@ -251,6 +267,8 @@ function Convert-FixLogEvent([string]$Line,[string]$Relative) {
     if(-not [datetime]::TryParse($match.Groups['utc'].Value,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$utc)){return $null}
     $stamp=$utc.ToUniversalTime().ToString('o');$body=$match.Groups['body'].Value
     if($Relative -ceq 'diagnostics/portable-launch.log'){
+        $detail=[regex]::Match($body,'\APUBLIC_IDENTITY_DETAIL reason=(?<reason>registration|path-missing|path-invalid|path-access-denied|path-reparse|path-metadata-unavailable|manifest|signature|process|unknown) mode=(?<mode>launch|check|configure)\z')
+        if($detail.Success){return [pscustomobject]@{utc=$stamp;category='public-identity-detail';reason=$detail.Groups['reason'].Value;mode=$detail.Groups['mode'].Value}}
         $codes=@('PUBLIC_ENTRY_BUSY','PUBLIC_PREPARATION_TIMEOUT','PUBLIC_LAUNCH_FAILED','PUBLIC_CHILD_TIMEOUT','PUBLIC_COMPONENT_OR_SIGNATURE_REJECTED','PUBLIC_PREPARATION_FAILED','PUBLIC_UNSUPPORTED_WINDOWS','PUBLIC_CODE_INTEGRITY_FAILED','PUBLIC_MEDIA_INCOMPLETE','PUBLIC_LAUNCHER_CONFIG_INVALID','PUBLIC_LAUNCHER_ASSET_INVALID','PUBLIC_OFFICIAL_CODEX_NOT_INSTALLED','PUBLIC_PACKAGE_ENUMERATION_FAILED','PUBLIC_SUPPORTED_CODEX_EXECUTABLE_NOT_FOUND','PUBLIC_OFFICIAL_DISCOVERY_FAILED','PUBLIC_OFFICIAL_IDENTITY_REJECTED','PUBLIC_OFFICIAL_RUNTIME_UNSUPPORTED')
         if($body -cin $codes){return [pscustomobject]@{utc=$stamp;category='public-entry';publicCode=$body}}
         $exit=[regex]::Match($body,'\APUBLIC_CHILD_EXIT_(?<code>-?\d{1,10})\z');$number=0

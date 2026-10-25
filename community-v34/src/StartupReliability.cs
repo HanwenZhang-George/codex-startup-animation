@@ -21,9 +21,62 @@ namespace DragonLauncher
         private readonly long created;
         private readonly string executable;
         private readonly bool initiallyMinimized;
+        private readonly NativeHandoff.ReplayCandidate uncommitted;
         private int initialMinimizeClaimed;
         private ExistingReplayTarget(IntPtr window,uint pid,long created,string executable,bool initiallyMinimized)
         {Window=window;this.pid=pid;this.created=created;this.executable=executable;this.initiallyMinimized=initiallyMinimized;}
+        private ExistingReplayTarget(NativeHandoff.ReplayCandidate candidate,uint pid,long created,string executable)
+            :this(candidate.Window,pid,created,executable,candidate.IsMinimized){uncommitted=candidate;}
+
+        // Unlike Find's legacy cache-backed lookup, bounded startup observation
+        // cannot publish bridge/native identities. Only the accepted caller may
+        // commit this candidate after all deadline and host checks finish.
+        internal static ExistingReplayTarget FindUncommitted(Settings settings,string root,Action<string> log=null)
+        {return new UncommittedSearch(settings,root,log).Find();}
+        internal sealed class UncommittedSearch
+        {
+            private readonly Settings settings;
+            private readonly string root;
+            private readonly Action<string> log;
+            private BridgeClientIdentity binding;
+            private bool bridgeChecked;
+            private string lastCounts;
+            internal UncommittedSearch(Settings settings,string root,Action<string> log)
+            {this.settings=settings;this.root=root;this.log=log;}
+            private void Candidates(int phase)
+            {
+                try{
+                    if(log==null)return;
+                    string counts=NativeHandoff.DescribeReplayAvailability(settings,binding);
+                    if(counts==lastCounts)return;lastCounts=counts;
+                    log("replay-native-candidates phase="+phase.ToString(System.Globalization.CultureInfo.InvariantCulture)+" "+
+                        (CandidateCountsValid(counts)?counts:"countsUnavailable=true"));
+                }catch{}
+            }
+            internal ExistingReplayTarget Find()
+            {
+                var candidate=NativeHandoff.FindReplayCandidate(settings,binding);Candidates(1);
+                if(candidate==null&&!bridgeChecked){
+                    bridgeChecked=true;
+                    using(var session=BridgeActivation.Discover(root,0,log)){
+                        binding=BridgeClientIdentity.Attest(settings,root,session,log);
+                        if(binding!=null)candidate=NativeHandoff.FindReplayCandidate(settings,binding);
+                    }
+                    Candidates(4);
+                }
+                if(candidate==null)return null;
+                uint processId=BridgeActivation.WindowProcessId(candidate.Window);
+                if(processId==0||processId>Int32.MaxValue)return null;
+                using(var process=BridgeNative.OpenReadProcess(processId)){
+                    long start;IntPtr handle=process.DangerousGetHandle();
+                    if(!BridgeNative.IsAlive(handle)||!BridgeNative.CreationTime(handle,out start))return null;
+                    var result=new ExistingReplayTarget(candidate,processId,start,BridgeNative.ImagePath(handle));
+                    return result.IsCurrentCore()?result:null;
+                }
+            }
+        }
+        internal bool CommitSelection()
+        {return IsCurrent && (uncommitted==null||uncommitted.Commit());}
         internal static bool CandidateCountsValid(string counts)
         {
             // Older public builds emit the first five counters. The complete
@@ -81,7 +134,7 @@ namespace DragonLauncher
         private bool IsCurrentCore()
         {
             if(Window==IntPtr.Zero||pid==0||pid>Int32.MaxValue||created<=0)return false;
-            if(!NativeHandoff.FindCurrentStillValid(Window)||BridgeActivation.WindowProcessId(Window)!=pid)return false;
+            if(!(uncommitted==null?NativeHandoff.FindCurrentStillValid(Window):uncommitted.IsCurrent)||BridgeActivation.WindowProcessId(Window)!=pid)return false;
             using(var process=BridgeNative.OpenReadProcess(pid)){
                 long start;IntPtr handle=process.DangerousGetHandle();
                 return BridgeNative.IsAlive(handle)&&BridgeNative.CreationTime(handle,out start)&&

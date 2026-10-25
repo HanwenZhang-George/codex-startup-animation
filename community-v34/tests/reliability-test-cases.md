@@ -154,3 +154,78 @@ normal exit/reopen, ESC, then collect one report from the actual launch director
 Do not run developer fixtures on the end-user machine. No GPU stress test is required.
 Unexpected future runtime/identity/UI changes remain explicit unsupported cases rather than
 being described as guaranteed compatible or silently bypassing validation.
+
+## R14 registered-root compatibility
+
+Only a package root returned by current-user Windows registration may use the
+local alias resolver. Validate direct paths without requesting additional access
+to ordinary WindowsApps ancestors. Resolve local directory junctions/symlinks in
+bounded steps; hold alias data-read leases while reading the manifest. Do not
+follow UNC, Volume-GUID-only, unknown/cloud targets or child links. Keep exact
+manifest/version/family, Authenticode and process-generation validation.
+
+Regression commands (fresh output directories outside source):
+- `Test-OfficialRegisteredPath.ps1`: old direct-link rejection, registered alias
+  success, real retarget/rename denial, release/update, loops, invalid tags,
+  remote child-link rejection before traversal, unsigned identity refusal,
+  and a synthetic process image queried after alias launch.
+- `Test-RegisteredPathProbe.ps1`: shared resolver assembly hash/size/duplicate
+  validation, direct and alias paths, absent helper, exhausted budget, privacy.
+- `Test-OfficialPathDiagnostics.ps1`: bounded reason/mode association, ambiguous
+  timestamps/logs, historical compatibility, no private text or playback proof.
+- Retain `Test-OfficialIdentity.ps1 -ReadOnlyLive` as a read-only compatibility
+  gate on a real Windows installation: pure local fixtures do not reproduce all
+  WindowsApps access rules. It must not launch or close the official client.
+
+A blocked-root report alone does not identify the precise ACL or reparse layout.
+Affected-computer acceptance is required; new fixed diagnostic reasons narrow
+any remaining failure without weakening validation or exporting real paths.
+
+## R15 existing-client startup classification
+
+The public entry's process-presence flag is only a hint. Before the animation,
+classify a fresh verified process/window and the authenticated host from the same
+package directory. A background process without an eligible window may receive
+one registered activation; its returned PID alone never authorizes a window.
+All automatic observations share a bounded deadline. A timed-out activation/read
+is terminal, and late reads must not publish native identity caches.
+
+Test ExistingClientStartup with injected hooks: cold absence, stale parent hint,
+visible and minimized targets, managed/paused/disabled hosts, missing/unverified
+host, manual Retry with background processes still present, Cancel, verified exit,
+late/failed activation, HWND disappearance and generation changes. Retain native
+read-only replay, minimized compensation, lifecycle recovery, identity updates,
+registered aliases, resource recovery and privacy regression suites.
+
+Test WarmStartDiagnostics with synthetic attempts: nine unavailable windows and
+five animation-only handoffs must not become wallpaper success. Latest-entry
+association, wrong-source records, duplicate/out-of-range fields, conflicting
+routes and historical playback must remain conservative. Reports do not prove
+visual quality or identify why the user exited without independent evidence.
+
+Affected-PC acceptance: fully quit and launch from a fresh complete directory;
+repeat while open and while minimized; start from the ordinary official entry
+then follow the manual exit/Retry guidance. Capture Diagnostics/Reports immediately
+after failure or while a successful session is still open. Do not force-stop an
+application, switch the live user's wallpaper, or use GPU stress to run unit tests.
+
+
+## R16 early animation dismissal
+
+Exercise real movie close, pulse dismiss and native Window.Close callbacks rather
+than calling SkipAnimation alone. With an attached or late authenticated session,
+these user actions must retain reveal intent and close optional animation/input
+ownership. They must not enqueue disable, restart a client, claim playback success,
+or extend existing cleanup deadlines. Verify prior disable, preview, internal
+terminal failure and system shutdown do not acquire a new activation capability.
+
+Use the actual HostState and WallpaperSession with synthetic CDP: hold preparation
+before first-frame readiness, send reveal early, then complete the same generation.
+Verify eventual reveal; test disable before/after reveal and invalidated target,
+transport or document generation. Do not launch the installed client or stress GPU.
+
+Diagnostics must associate dismissal to the latest attempt, keep fixed allowlists,
+and distinguish a provisional missing main/frame from a terminal HOST_66. Historical
+layout failure must remain visible without being blamed for a later user dismissal.
+Affected-PC validation still needs cold movie-close, cold ESC, normal completion
+and warm/minimized replay using the complete package and its own Diagnostics.

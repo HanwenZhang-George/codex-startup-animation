@@ -62,7 +62,9 @@ function Get-CodexAnalysisEvent($Event) {
     if($phase -ne 10 -and $code -ne 0){return $null}
     $layout=Get-CodexAnalysisNumber $Event 'layoutSupported' 1
     $reason=Get-CodexAnalysisEnum $Event 'layoutReason' @('not-checked','root-missing','main-count','main-token','workspace-shape','shell-shape','composer-ambiguous','frame-count','frame-token','frame-row','frame-shape','ready')
-    if($layout -eq 0){if($reason -ceq 'composer-ambiguous'){return 'composer-ambiguous'};return 'layout-failed'}
+    # A missing main during phase 6 may be an intermediate page-load sample.
+    # Preserve specific shape failures and the separate terminal code 166.
+    if($layout -eq 0){if($phase -eq 38 -and (Get-CodexAnalysisNumber $Event 'sourcePhase' 63) -eq 6 -and $reason -ceq 'main-count'){return 'layout-pending'};if($reason -ceq 'composer-ambiguous'){return 'composer-ambiguous'};return 'layout-failed'}
     $renderer=Get-CodexAnalysisEnum $Event 'rendererCode' @('media-error','play-rejected','first-frame-timeout','reveal-timeout','resume-timeout','playback-stalled','disposed','retired','invalid-file','file-too-large','unsupported-layout')
     if((Get-CodexAnalysisNumber $Event 'videoErrorCode' 4) -ge 1 -or $renderer -ceq 'media-error'){return 'media-error'}
     if($renderer -cin @('play-rejected','first-frame-timeout','reveal-timeout','resume-timeout','playback-stalled')){return 'playback-failed'}
@@ -84,6 +86,151 @@ function Test-CodexHistoricalPlayback($Event) {
     if((Get-CodexAnalysisNumber $Event 'protocolVersion' 2) -ne 2 -or (Get-CodexAnalysisEnum $Event 'health' @('fresh')) -cne 'fresh' -or (Get-CodexAnalysisNumber $Event 'disposed' 1) -ne 0 -or (Get-CodexAnalysisNumber $Event 'documentHidden' 1) -ne 0){return $false}
     if((Get-CodexAnalysisNumber $Event 'playing' 1) -eq 1 -and (Get-CodexAnalysisEnum $Event 'actualPhase' @('visible')) -ceq 'visible'){return $true}
     return (Get-CodexAnalysisEnum $Event 'actualPhase' @('gap')) -ceq 'gap' -and (Get-CodexAnalysisNumber $Event 'playing' 1) -eq 0 -and (Get-CodexAnalysisNumber $Event 'videoPaused' 1) -eq 1 -and (Get-CodexAnalysisNumber $Event 'presentedFrames' 2147483647 1) -gt 0
+}
+function Test-CodexAnimationOnlyHandoff($Event) {
+    return (Get-CodexAnalysisEnum $Event 'category' @('handoff-complete')) -ceq 'handoff-complete' -and
+        (Get-CodexAnalysisNumber $Event 'success' 1) -eq 1 -and
+        (Get-CodexAnalysisNumber $Event 'replayExisting' 1) -eq 1 -and
+        (Get-CodexAnalysisNumber $Event 'wallpaperCommitConfirmed' 1) -eq 0 -and
+        (Get-CodexAnalysisNumber $Event 'wallpaperPlaybackRequiresObserver' 1) -eq 0
+}
+function Get-CodexWarmStartEvidence($Report) {
+    # Only the latest entry in one authoritative launcher stream can establish
+    # this click's route. A continuing host is not evidence for a replay click.
+    $result=@{lines=@();suppressState=$false}
+    $logs=Get-CodexAnalysisValue $Report 'logs'
+    if($logs -isnot [array] -or $logs.Count -gt 16){return [pscustomobject]$result}
+    $sources=@($logs|Where-Object {(Get-CodexAnalysisEnum $_ 'log' @('output/handoff-latest.log')) -ceq 'output/handoff-latest.log'})
+    if($sources.Count -ne 1){return [pscustomobject]$result}
+    $records=Get-CodexAnalysisValue $sources[0] 'records'
+    if($records -isnot [array] -or $records.Count -gt 512){return [pscustomobject]$result}
+    $items=[Collections.Generic.List[object]]::new();$cutoff=-1L
+    foreach($record in $records){
+        $category=Get-CodexAnalysisEnum $record 'category' @('launcher-stage','warm-start','handoff-complete')
+        if($category -ceq 'unknown'){continue}
+        $ticks=Get-CodexAnalysisUtc $record
+        if($ticks -lt 0){return [pscustomobject]$result}
+        if($category -ceq 'launcher-stage' -and (Get-CodexAnalysisEnum $record 'stage' @('launcher-entry')) -ceq 'launcher-entry'){$cutoff=[Math]::Max($cutoff,$ticks)}
+        $items.Add([pscustomobject]@{ticks=$ticks;category=$category;record=$record})
+    }
+    if($cutoff -lt 0){return [pscustomobject]$result}
+    $current=@($items|Where-Object {$_.ticks -ge $cutoff})
+    $routes=@($current|Where-Object {$_.category -ceq 'warm-start'}|Sort-Object ticks -Descending)
+    $lines=[Collections.Generic.List[string]]::new();$routeAt=-1L
+    if($routes.Count -gt 0){
+        $routeAt=$routes[0].ticks;$signatures=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $decision='unknown';$reason='unknown';$hostState='unknown';$elapsed=-1L;$activations=-1L
+        foreach($item in ($routes|Where-Object {$_.ticks -eq $routeAt})){
+            $decision=Get-CodexAnalysisEnum $item.record 'decision' @('cold','replay','activate','needs-exit','cancelled','unavailable')
+            $reason=Get-CodexAnalysisEnum $item.record 'reason' @('no-running','existing-window','window-recovered','no-window','activation-timeout','activation-failed','window-timeout','observation-timeout','identity-unavailable','target-ended','host-unavailable','manual-retry-running','manual-retry-cold','user-cancelled','animation-only')
+            $hostState=Get-CodexAnalysisEnum $item.record 'hostState' @('unchecked','unavailable','unverified','managed','disabled','paused','faulted','animation-only')
+            $elapsed=Get-CodexAnalysisNumber $item.record 'elapsedMs' 31536000000
+            $activations=Get-CodexAnalysisNumber $item.record 'activationCount' 1
+            [void]$signatures.Add(($decision,$reason,$hostState,$elapsed,$activations -join '|'))
+        }
+        $result.suppressState=$true
+        if($signatures.Count -ne 1){$result.lines=@('本次启动路由记录冲突，不能选其中一条确认激活、宿主接入或播放；未采用旧宿主播放证明。');return [pscustomobject]$result}
+        if($decision -ceq 'unknown' -or $reason -ceq 'unknown' -or $hostState -ceq 'unknown' -or $elapsed -lt 0 -or $activations -lt 0){$result.lines=@('本次启动路由字段不完整，无法确认激活或壁纸会话；未采用较早路由或旧宿主播放证明。');return [pscustomobject]$result}
+        $reasonPairs=@{'cold'=@('no-running','manual-retry-cold');'replay'=@('existing-window','window-recovered','animation-only');'activate'=@('no-window');'needs-exit'=@('host-unavailable','manual-retry-running');'cancelled'=@('user-cancelled');'unavailable'=@('activation-timeout','activation-failed','window-timeout','observation-timeout','identity-unavailable','target-ended')}
+        if($reason -cnotin $reasonPairs[$decision] -or ($decision -ceq 'activate' -and $activations -ne 1)){$result.lines=@('本次启动路由字段相互矛盾，无法确认激活或壁纸会话；未采用较早路由或旧宿主播放证明。');return [pscustomobject]$result}
+        switch($decision){
+            'cold' {$lines.Add('本次启动路由：冷启动；当次检查未发现仍需复用的官方进程，后续仍须新宿主、首帧和播放证据。');$result.suppressState=$false}
+            'replay' {$lines.Add('本次启动路由：重播现有窗口；重播决定本身不是壁纸准备或播放证明。')}
+            'activate' {$lines.Add('本次启动路由：未找到合格窗口，已请求激活一次；请求已发出不等于窗口已恢复，也不等于壁纸接入成功。')}
+            'needs-exit' {$lines.Add('本次启动路由：没有通过验证的同目录壁纸会话；程序保留现有客户端。可先保存工作、正常完全退出 Codex，再从本包 Launch.exe 启动；不要强制结束进程或反复连点。')}
+            'cancelled' {$lines.Add('本次启动路由：用户取消了后续处理，程序保留现有客户端；没有据此确认壁纸播放。')}
+            'unavailable' {
+                $reasons=@{'activation-timeout'='激活请求超过期限';'activation-failed'='激活请求失败';'window-timeout'='期限内未获得合格窗口';'observation-timeout'='窗口或身份观察超过期限';'identity-unavailable'='身份观察未能完成';'target-ended'='已选目标失效';'no-window'='未找到合格窗口';'manual-retry-running'='用户再次检查时客户端仍在运行'}
+                $detail=if($reasons.ContainsKey($reason)){$reasons[$reason]}else{'未获得可安全使用的目标'}
+                $lines.Add('本次启动路由：'+$detail+'；本次没有确认新的壁纸接入，无需继续长时间等待。')
+            }
+        }
+        if($decision -ceq 'replay'){
+            $states=@{'managed'='通过验证的同目录宿主会话';'disabled'='通过验证的同目录宿主禁用状态';'paused'='通过验证的同目录宿主暂停状态';'faulted'='通过验证的同目录宿主故障状态';'animation-only'='仅动画重播选择'}
+            if($states.ContainsKey($hostState)){$lines.Add('本次重播保留'+$states[$hostState]+'；没有重新准备或强制恢复壁纸，不能证明既有壁纸正在播放。')}
+            else{$lines.Add('本次重播未确认可用的同目录壁纸宿主；不能把重播当成已有壁纸的证明。')}
+        }
+        $lines.Add(('路由观察耗时 {0} 毫秒；激活请求计数 {1}。耗时可能包含用户选择等待，不表示整个时间都在自动探测。' -f $elapsed,$activations))
+    }
+    $handoffs=@($current|Where-Object {$_.category -ceq 'handoff-complete' -and $_.ticks -ge $routeAt}|Sort-Object ticks -Descending)
+    if($handoffs.Count -gt 0){
+        $latest=@($handoffs|Where-Object {$_.ticks -eq $handoffs[0].ticks})
+        if(@($latest|Where-Object {-not (Test-CodexAnimationOnlyHandoff $_.record)}).Count -eq 0){
+            $lines.Add('本次仅完成动画及窗口交接；没有新建壁纸准备，也不能证明既有壁纸正在播放。')
+            $result.suppressState=$true
+        }
+    }
+    $result.lines=$lines.ToArray();return [pscustomobject]$result
+}
+function Get-CodexEarlyDismissalAnalysis($Report) {
+    $result=@{lines=@();hasDismissal=$false;playbackTicks=@()}
+    $logs=Get-CodexAnalysisValue $Report 'logs'
+    if($logs -isnot [array] -or $logs.Count -gt 16){return [pscustomobject]$result}
+    $sources=@($logs|Where-Object {(Get-CodexAnalysisEnum $_ 'log' @('output/handoff-latest.log')) -ceq 'output/handoff-latest.log'})
+    if($sources.Count -ne 1){return [pscustomobject]$result}
+    $records=Get-CodexAnalysisValue $sources[0] 'records'
+    if($records -isnot [array] -or $records.Count -gt 512){return [pscustomobject]$result}
+    $items=[Collections.Generic.List[object]]::new();$cutoff=-1L
+    foreach($record in $records){
+        $category=Get-CodexAnalysisEnum $record 'category' @('launcher-stage','animation-skip','launcher-cleanup-complete','handoff-complete')
+        if($category -ceq 'unknown'){continue};$ticks=Get-CodexAnalysisUtc $record;if($ticks -lt 0){return [pscustomobject]$result}
+        if($category -ceq 'launcher-stage' -and (Get-CodexAnalysisEnum $record 'stage' @('launcher-entry')) -ceq 'launcher-entry'){$cutoff=[Math]::Max($cutoff,$ticks)}
+        $items.Add([pscustomobject]@{ticks=$ticks;category=$category;record=$record})
+    }
+    if($cutoff -lt 0){return [pscustomobject]$result}
+    $current=@($items|Where-Object {$_.ticks -ge $cutoff});$skips=@($current|Where-Object {$_.category -ceq 'animation-skip'}|Sort-Object ticks -Descending)
+    $lines=[Collections.Generic.List[string]]::new()
+    if($skips.Count -gt 0){
+        $result.hasDismissal=$true
+        $signatures=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$source='unknown';$intent='unknown';$activation=-1L
+        foreach($item in ($skips|Where-Object {$_.ticks -eq $skips[0].ticks})){
+            $source=Get-CodexAnalysisEnum $item.record 'source' @('keyboard','movie-button','pulse-button','window-close','resource-protection','compatibility-fallback')
+            $intent=Get-CodexAnalysisEnum $item.record 'wallpaperIntent' @('reveal','disabled','preserve','none')
+            $activation=Get-CodexAnalysisNumber $item.record 'activationRequested' 1
+            [void]$signatures.Add(($source,$intent,$activation -join '|'))
+        }
+        if($signatures.Count -ne 1){$lines.Add('本次动画结束记录冲突，不能选择其中一条确认来源或壁纸显示意图。')}
+        elseif($source -ceq 'unknown' -or $intent -ceq 'unknown' -or $activation -lt 0){$lines.Add('本次动画结束记录字段不完整，不能确认来源或壁纸显示意图。')}
+        else{
+            $sourcesText=@{'keyboard'='键盘跳过';'movie-button'='动画按钮';'pulse-button'='转场按钮';'window-close'='窗口关闭';'resource-protection'='资源保护';'compatibility-fallback'='兼容路径回退'}
+            $intentText=@{'reveal'='保留壁纸显示意图，准备可在动画结束后继续';'disabled'='保留已有禁用状态';'preserve'='保留现有壁纸会话状态';'none'='未请求壁纸显示'}
+            $lines.Add(('本次动画提前结束：来源为{0}；{1}。这不是壁纸播放成功，仍须后续首帧、播放和样式证据。' -f $sourcesText[$source],$intentText[$intent]))
+            $lines.Add(('动画结束时激活请求标记为 {0}；该标记不证明客户端已恢复或显示成功。' -f $activation))
+        }
+    }
+    $hostEvents=[Collections.Generic.List[object]]::new();$names=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach($log in $logs){
+        $name=Get-CodexAnalysisEnum $log 'log' @('output/wallpaper-readiness.log','output/wallpaper-readiness.log.1')
+        if($name -ceq 'unknown'){continue};if(-not $names.Add($name)){$result.lines=$lines.ToArray();return [pscustomobject]$result}
+        $records=Get-CodexAnalysisValue $log 'records';if($records -isnot [array] -or $records.Count -gt 512){continue}
+        foreach($record in $records){
+            $ticks=Get-CodexAnalysisUtc $record;if($ticks -lt 0 -or (Get-CodexAnalysisEnum $record 'category' @('host-phase')) -cne 'host-phase'){continue}
+            $hostEvents.Add([pscustomobject]@{ticks=$ticks;phase=(Get-CodexAnalysisNumber $record 'phase' 63);code=(Get-CodexAnalysisNumber $record 'code' 65535);run=(Get-CodexAnalysisNumber $record 'hostRunOrdinal' 32 1);record=$record})
+        }
+    }
+    if(@($hostEvents|Where-Object {$_.ticks -lt $cutoff -and $_.code -eq 166 -and ($_.phase -eq 6 -or $_.phase -eq 15)}).Count -gt 0){$lines.Add('较早宿主记录保留了布局等待失败（错误码 166）；不能把较早故障直接作为最新这次的原因。')}
+    # Legacy logs lack a dismissal source. Only a unique new host and an
+    # ordered cleanup/disposal chain can support this limited observation.
+    $starts=@($hostEvents|Where-Object {$_.ticks -ge $cutoff -and $_.phase -eq 20 -and $_.code -eq 0})
+    if($starts.Count -eq 1 -and $starts[0].run -gt 0 -and @($hostEvents|Where-Object {$_.phase -eq 20 -and $_.run -eq $starts[0].run}).Count -eq 1){
+        $scope=@($hostEvents|Where-Object {$_.ticks -ge $starts[0].ticks -and $_.run -eq $starts[0].run})
+        foreach($sample in ($scope|Where-Object {$_.phase -eq 39 -and (Test-CodexHistoricalPlayback $_.record)})){
+            $peers=@($scope|Where-Object {$_.phase -eq 39 -and $_.ticks -eq $sample.ticks})
+            if(@($peers|Where-Object {-not (Test-CodexHistoricalPlayback $_.record)}).Count -eq 0){$result.playbackTicks+= $sample.ticks}
+        }
+    }
+    $cleanups=@($current|Where-Object {$_.category -ceq 'launcher-cleanup-complete'}|Sort-Object ticks)
+    if($skips.Count -eq 0 -and $starts.Count -eq 1 -and $starts[0].run -gt 0 -and $cleanups.Count -eq 1 -and @($current|Where-Object {$_.category -ceq 'handoff-complete'}).Count -eq 0){
+        $start=$starts[0];$cleanup=$cleanups[0].ticks
+        if(@($hostEvents|Where-Object {$_.phase -eq 20 -and $_.run -eq $start.run}).Count -eq 1){
+            $scope=@($hostEvents|Where-Object {$_.ticks -ge $start.ticks -and $_.run -eq $start.run})
+            $samples=@($scope|Where-Object {$_.ticks -lt $cleanup -and $_.phase -eq 38 -and $_.code -eq 0 -and (Get-CodexAnalysisNumber $_.record 'sourcePhase' 63) -eq 6})
+            $disposed=@($scope|Where-Object {$_.ticks -ge $cleanup -and ($_.ticks-$cleanup) -le 50000000L -and $_.phase -eq 13 -and $_.code -eq 0})
+            $later=@($scope|Where-Object {$_.phase -cin @(7,8,9,10,11,39) -or (($_.phase -ge 1 -and $_.phase -le 15) -and $_.code -ge 100 -and $_.code -le 199)})
+            if($samples.Count -gt 0 -and $disposed.Count -gt 0 -and $later.Count -eq 0){$lines.Add('本次记录显示准备阶段提前清理：动画清理后宿主进入渲染清理，尚无准备完成或播放证明；没有记录关闭来源，不能据此确认具体用户操作，也不能把准备中的布局采样当作永久不兼容。')}
+        }
+    }
+    $result.lines=$lines.ToArray();return [pscustomobject]$result
 }
 function Get-CodexStartupHistoryAnalysis($Report) {
     # Historical observations are separate from the latest-state conclusion.
@@ -128,7 +275,10 @@ function Get-CodexStartupHistoryAnalysis($Report) {
         $label=('启动尝试 {0}（UTC {1}）' -f ($index+1),([DateTime]::new($begin,[DateTimeKind]::Utc)).ToString('HH:mm:ss.fff',[Globalization.CultureInfo]::InvariantCulture))
         $parts=[Collections.Generic.List[string]]::new()
         if($replay){$parts.Add('重播未找到合格窗口；本次未建立新的壁纸接入')}
-        elseif($complete.Count -gt 0){$parts.Add(('完成交接，入口至交接 {0} 毫秒' -f [long](($complete[0].ticks-$begin)/[TimeSpan]::TicksPerMillisecond)))}
+        elseif($complete.Count -gt 0){
+            if(@($complete|Where-Object {-not (Test-CodexAnimationOnlyHandoff $_.record)}).Count -eq 0){$parts.Add('仅完成动画及窗口交接；没有新建壁纸准备，不能证明既有壁纸正在播放')}
+            else{$parts.Add(('完成交接，入口至交接 {0} 毫秒' -f [long](($complete[0].ticks-$begin)/[TimeSpan]::TicksPerMillisecond)))}
+        }
         else{$parts.Add('未保留成功交接记录')}
         if($newHosts.Count -gt 1){$parts.Add('出现多个新宿主，无法唯一归属');$lines.Add($label+'：'+($parts -join '；')+'。');continue}
         if($newHosts.Count -eq 0){$parts.Add('没有本次新宿主起点；旧宿主记录不并入本次');$lines.Add($label+'：'+($parts -join '；')+'。');continue}
@@ -327,6 +477,31 @@ function Get-CodexResourceProtectionAnalysis($Report) {
 }
 function Get-CodexOfficialAdaptationAnalysis($Report) {
     $lines=[Collections.Generic.List[string]]::new()
+    $compatibility=Get-CodexAnalysisValue $Report 'compatibility'
+    $packages=Get-CodexAnalysisValue $compatibility 'packages'
+    if($packages -is [array] -and $packages.Count -le 32){
+        $pathReasons=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$aliasObserved=$false;$legacyBlocked=$false
+        foreach($package in $packages){
+            $readState=Get-CodexAnalysisEnum $package 'readState' @('ok','blocked-root','unavailable','budget-exhausted')
+            $reason=Get-CodexAnalysisEnum $package 'rootPathReason' @('ok','missing','invalid-path','unsupported-drive','reparse','access-denied','metadata-unavailable')
+            $kind=Get-CodexAnalysisEnum $package 'rootPathKind' @('direct','registered-alias')
+            if($reason -ceq 'ok' -and $kind -ceq 'registered-alias'){$aliasObserved=$true}
+            if($readState -ceq 'blocked-root'){
+                if($reason -cin @('missing','invalid-path','unsupported-drive','reparse','access-denied','metadata-unavailable')){[void]$pathReasons.Add($reason)}else{$legacyBlocked=$true}
+            }
+        }
+        $pathMessages=@{
+            'missing'='采集时注册安装目录未找到；这可能发生于安装或更新切换，尚不能说明客户端已被卸载。'
+            'invalid-path'='采集时注册安装目录未满足本地路径格式检查，未继续读取；未导出具体路径。'
+            'unsupported-drive'='采集时注册安装目录所在驱动器类型未获支持；这不是显卡或视频缺失的证据。'
+            'reparse'='采集时注册安装目录仍含未通过支持规则的重解析路径；没有放开任意联接或网络路径。'
+            'access-denied'='采集时读取注册安装目录元数据被拒绝；尚不能说明客户端签名无效，也不应通过关闭安全校验解决。'
+            'metadata-unavailable'='采集时注册安装目录元数据不可用；这类证据不能单独区分文件系统兼容、路径状态与临时更新。'
+        }
+        foreach($reason in @('missing','invalid-path','unsupported-drive','reparse','access-denied','metadata-unavailable')){if($pathReasons.Contains($reason)){$lines.Add($pathMessages[$reason])}}
+        if($legacyBlocked){$lines.Add('采集时注册安装目录未通过路径读取检查，但报告缺少可确认的细项；不能据此归因于权限、显卡、素材缺失或客户端框架变化。')}
+        if($aliasObserved){$lines.Add('采集时识别到当前注册包的目录别名；这里只检查目录元数据与路径关系，不代表官方签名、实际进程或壁纸接入已通过验证。')}
+    }
     $policy=Get-CodexAnalysisValue $Report 'officialPolicy'
     $policyState=Get-CodexAnalysisEnum $policy 'state' @('read','missing','invalid','unavailable')
     if($policyState -ceq 'read'){
@@ -363,6 +538,29 @@ function Get-CodexOfficialAdaptationAnalysis($Report) {
     }
     return $lines.ToArray()
 }
+function Get-CodexPublicIdentityDetail($Records,[int]$FailureIndex,[long]$FailureTicks,[long]$Cutoff) {
+    # Public detail has no run id. Associate only one adjacent pair, in one
+    # source, within a small clock window and with no competing entry event.
+    # It explains a rejection; it can never establish signature trust/playback.
+    if($Records -isnot [array] -or $Records.Count -gt 512 -or $FailureIndex -lt 1 -or $FailureIndex -ge $Records.Count){return $null}
+    $index=$FailureIndex-1;$detail=$Records[$index]
+    if((Get-CodexAnalysisEnum $detail 'category' @('public-identity-detail')) -cne 'public-identity-detail'){return $null}
+    $reason=Get-CodexAnalysisEnum $detail 'reason' @('registration','path-missing','path-invalid','path-access-denied','path-reparse','path-metadata-unavailable','manifest','signature','process','unknown')
+    # The literal unknown reason is supported, but arbitrary input must not be
+    # collapsed into that accepted value while retaining a claimed association.
+    if((Get-CodexAnalysisValue $detail 'reason') -cne $reason){return $null}
+    $mode=Get-CodexAnalysisEnum $detail 'mode' @('launch','check','configure')
+    $ticks=Get-CodexAnalysisUtc $detail
+    if($mode -ceq 'unknown' -or $ticks -le $Cutoff -or $ticks -lt 0 -or $ticks -gt $FailureTicks -or $FailureTicks-$ticks -gt (2L*[TimeSpan]::TicksPerSecond)){return $null}
+    for($i=0;$i -lt $Records.Count;$i++){
+        if($i -eq $index -or $i -eq $FailureIndex){continue}
+        $category=Get-CodexAnalysisEnum $Records[$i] 'category' @('public-entry','public-identity-detail')
+        if($category -ceq 'unknown'){continue}
+        $otherTicks=Get-CodexAnalysisUtc $Records[$i]
+        if(($otherTicks -ge $ticks -and $otherTicks -le $FailureTicks) -or ($category -ceq 'public-identity-detail' -and $i -eq $index-1)){return $null}
+    }
+    return [pscustomobject]@{reason=$reason;mode=$mode}
+}
 function Get-CodexPublicEntryEvidence($Report) {
     $result=[ordered]@{suppressPlaybackProof=$false;lines=@()}
     $logs=Get-CodexAnalysisValue $Report 'logs'
@@ -381,8 +579,9 @@ function Get-CodexPublicEntryEvidence($Report) {
         }
     }
     $codes=@('PUBLIC_ENTRY_BUSY','PUBLIC_CHILD_EXIT','PUBLIC_PREPARATION_TIMEOUT','PUBLIC_LAUNCH_FAILED','PUBLIC_CHILD_TIMEOUT','PUBLIC_COMPONENT_OR_SIGNATURE_REJECTED','PUBLIC_PREPARATION_FAILED','PUBLIC_UNSUPPORTED_WINDOWS','PUBLIC_CODE_INTEGRITY_FAILED','PUBLIC_MEDIA_INCOMPLETE','PUBLIC_LAUNCHER_CONFIG_INVALID','PUBLIC_LAUNCHER_ASSET_INVALID','PUBLIC_OFFICIAL_CODEX_NOT_INSTALLED','PUBLIC_PACKAGE_ENUMERATION_FAILED','PUBLIC_SUPPORTED_CODEX_EXECUTABLE_NOT_FOUND','PUBLIC_OFFICIAL_DISCOVERY_FAILED','PUBLIC_OFFICIAL_IDENTITY_REJECTED','PUBLIC_OFFICIAL_RUNTIME_UNSUPPORTED')
-    $latest=-1L;$untimed=$false;$failures=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$neutralTimes=[Collections.Generic.HashSet[long]]::new()
-    foreach($source in $sources){foreach($entry in (Get-CodexAnalysisValue $source 'records')){
+    $latest=-1L;$untimed=$false;$failures=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$neutralTimes=[Collections.Generic.HashSet[long]]::new();$latestFailures=[Collections.Generic.List[object]]::new()
+    foreach($source in $sources){$sourceRecords=Get-CodexAnalysisValue $source 'records';for($index=0;$index -lt $sourceRecords.Count;$index++){
+        $entry=$sourceRecords[$index]
         if((Get-CodexAnalysisEnum $entry 'category' @('public-entry')) -cne 'public-entry'){continue}
         $code=Get-CodexAnalysisEnum $entry 'publicCode' $codes
         if($code -ceq 'unknown'){continue}
@@ -400,15 +599,36 @@ function Get-CodexPublicEntryEvidence($Report) {
         if($neutral){if($ticks -ge 0){[void]$neutralTimes.Add($ticks)};continue}
         if($ticks -lt 0){$untimed=$true;continue}
         if($ticks -lt $cutoff){continue}
-        if($ticks -gt $latest){$latest=$ticks;$failures.Clear()}
-        if($ticks -eq $latest){[void]$failures.Add($signature)}
+        if($ticks -gt $latest){$latest=$ticks;$failures.Clear();$latestFailures.Clear()}
+        if($ticks -eq $latest){[void]$failures.Add($signature);$latestFailures.Add([pscustomobject]@{records=$sourceRecords;index=$index;code=$code})}
     }}
     if($latest -lt 0 -and -not $untimed){return [pscustomobject]$result}
     $result.suppressPlaybackProof=$true
     if($untimed -or $sources.Count -ne 1 -or $failures.Count -ne 1 -or $latest -eq $cutoff -or $neutralTimes.Contains($latest)){
         $result.lines=@('公开入口记录的先后关系无法确认：存在无效时间、同一时刻不同结果、与启动边界同一时间或重复日志来源。未选择某条记录认定本次成功或失败；旧播放记录不能证明这次入口操作成功。')
     }else{
-        foreach($failure in $failures){$result.lines=@(('公开入口操作异常：{0}。该日志没有运行模式标记，可能来自启动、预览或校验；不能据此认定当前客户端或壁纸已经关闭。' -f $failure),'既有壁纸的播放记录不能证明这次公开入口操作成功；请结合本报告的固定错误码和文件校验结果分析。')}
+        $detail=$null
+        if($latestFailures.Count -eq 1 -and $latestFailures[0].code -cin @('PUBLIC_OFFICIAL_IDENTITY_REJECTED','PUBLIC_OFFICIAL_DISCOVERY_FAILED')){$detail=Get-CodexPublicIdentityDetail $latestFailures[0].records $latestFailures[0].index $latest $cutoff}
+        foreach($failure in $failures){
+            if($failure -ceq 'PUBLIC_CHILD_TIMEOUT'){$result.lines=@('公开入口操作异常：PUBLIC_CHILD_TIMEOUT（等待达到 120 秒）。外层启动器因此返回，但不关闭子程序；不能仅凭该码认定壁纸故障或客户端退出。若同时记录等待用户退出，子程序可能仍停留在“重试/取消”提示；报告不实时确认提示是否仍显示。')}
+            elseif($null -eq $detail){$result.lines=@(('公开入口操作异常：{0}。该日志没有运行模式标记，可能来自启动、预览或校验；不能据此认定当前客户端或壁纸已经关闭。' -f $failure))}
+            else{
+                $messages=@{
+                    'registration'='当次注册身份查询未通过；可能涉及更新切换或注册状态，不能单独证明客户端未安装。'
+                    'path-missing'='当次已注册客户端的必要路径未找到；不能仅凭这一项断言视频素材缺失。'
+                    'path-invalid'='当次客户端路径未通过本地路径格式或边界检查。'
+                    'path-access-denied'='当次客户端路径元数据读取被拒绝；保留身份校验，不要求反复管理员启动。'
+                    'path-reparse'='当次客户端路径包含未获支持的重解析关系；报告不输出具体路径。'
+                    'path-metadata-unavailable'='当次客户端路径元数据不可用；还需结合注册目录检查区分路径兼容与临时状态。'
+                    'manifest'='当次注册清单或入口信息未通过验证；不应手工取消官方身份校验。'
+                    'signature'='当次签名验证未通过或无法完成；这条记录不单独证明签名已被篡改。'
+                    'process'='当次实际进程身份未能验证；这不代表原有进程已经退出。'
+                    'unknown'='当次身份拒绝的具体阶段未能分类；不能将未知原因推断为性能不足。'
+                }
+                $result.lines=@(('公开入口操作异常：{0}。身份细项：{1}；操作模式：{2}。细项来自同一日志相邻且相差不超过两秒的记录；不代表原有客户端或壁纸已关闭。' -f $failure,$detail.reason,$detail.mode),$messages[$detail.reason])
+            }
+            $result.lines+= '既有壁纸的播放记录不能证明这次公开入口操作成功；请结合本报告的固定错误码和文件校验结果分析。'
+        }
     }
     return [pscustomobject]$result
 }
@@ -547,6 +767,7 @@ function Get-CodexDiagnosticAnalysis($Report,$FileCheck) {
         'connection-unknown'='最新有效记录：壁纸连接状态未确认；程序没有启动第二份客户端。'
         'activation-failed'='最新有效记录：客户端启动失败。'
         'layout-failed'='最新有效记录：页面布局未满足壁纸适配条件；不能仅凭此记录认定视频素材缺失。'
+        'layout-pending'='最新有效记录：准备中的布局采样尚未就绪；它不是布局等待超时或永久不兼容的证明，仍需后续准备、结束或故障记录。'
         'composer-ambiguous'='最新有效记录：输入区域布局存在歧义，壁纸按保护规则暂停接入。'
         'first-frame-failed'='最新有效记录：视频或首帧准备没有完成；可能涉及解码、页面或时序，尚不能确定具体原因。'
         'host-memory-failed'='最新有效记录：壁纸宿主因内存保护终止了本次准备（错误码 174），本次壁纸会话已停用。启动器释放动画或保留准备的请求不能撤销这条终态失败；这不证明素材缺失或解码失败。'
@@ -567,11 +788,17 @@ function Get-CodexDiagnosticAnalysis($Report,$FileCheck) {
         'snapshot-unconfirmed'='没有可解释的本次播放证明：最新状态字段不完整、相互矛盾或属于过期快照，不能继续采用更早的播放成功记录。'
     }
     $entryEvidence=Get-CodexPublicEntryEvidence $Report
-    if($meanings.Count -gt 1){$lines.Add('同一最新时间出现相互不同的状态记录，不能选其中一条断言成功或失败。')}
+    $warmEvidence=Get-CodexWarmStartEvidence $Report
+    $dismissalEvidence=Get-CodexEarlyDismissalAnalysis $Report
+    if($warmEvidence.suppressState){foreach($line in $warmEvidence.lines){$lines.Add($line)}}
+    elseif($meanings.Count -gt 1){$lines.Add('同一最新时间出现相互不同的状态记录，不能选其中一条断言成功或失败。')}
+    elseif($state -ceq 'observed-playing' -and $dismissalEvidence.hasDismissal -and $latest -notin $dismissalEvidence.playbackTicks){$lines.Add('本次动画结束已记录，但没有可关联到本次新宿主的播放证明；未把旧宿主播放作为本次操作成功。')}
     elseif($state -ceq 'observed-playing' -and $entryEvidence.suppressPlaybackProof){$lines.Add('存在尚未排除的公开入口异常记录，未将既有壁纸的播放状态作为这次入口操作成功的证明。')}
     elseif($messages.ContainsKey($state)){$lines.Add($messages[$state])}
     else{$lines.Add('没有可解释的本次运行状态记录；日志缺失、过期快照或未知字段均不能证明运行成功或失败。')}
+    if(-not $warmEvidence.suppressState){foreach($line in $warmEvidence.lines){$lines.Add($line)}}
     foreach($line in $entryEvidence.lines){$lines.Add($line)}
+    foreach($line in $dismissalEvidence.lines){$lines.Add($line)}
     foreach($line in (Get-CodexStartupHistoryAnalysis $Report)){$lines.Add($line)}
     foreach($line in (Get-CodexCompletedStartupAnalysis $Report)){$lines.Add($line)}
     foreach($line in (Get-CodexResourceProtectionAnalysis $Report)){$lines.Add($line)}

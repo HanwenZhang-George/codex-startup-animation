@@ -832,6 +832,8 @@ namespace DragonLauncher
         }
 
         private static TargetIdentity FromSettings(Settings settings)
+        {return FromSettings(settings,bridgeTarget);}
+        private static TargetIdentity FromSettings(Settings settings,BridgeClientIdentity binding)
         {
             if (settings == null) return null;
             var identity = new TargetIdentity();
@@ -847,10 +849,10 @@ namespace DragonLauncher
                 int separator = identity.AppId.IndexOf('!');
                 identity.Family = separator > 0 ? identity.AppId.Substring(0, separator) : "";
                 identity.Key = "app:" + identity.AppId;
-                if(bridgeTarget!=null && string.Equals(identity.AppId,BridgeClientIdentity.OfficialAppId,StringComparison.OrdinalIgnoreCase))
+                if(binding!=null && string.Equals(identity.AppId,BridgeClientIdentity.OfficialAppId,StringComparison.OrdinalIgnoreCase))
                 {
-                    identity.Bound=bridgeTarget;
-                    identity.Key += ";owned:"+bridgeTarget.Pid+":"+bridgeTarget.Created;
+                    identity.Bound=binding;
+                    identity.Key += ";owned:"+binding.Pid+":"+binding.Created;
                 }
             }
             return identity;
@@ -901,7 +903,7 @@ namespace DragonLauncher
             return GetProp(hwnd,marker)!=new IntPtr(1);
         }
 
-        private static bool ProcessMatches(uint pid, TargetIdentity expected)
+        private static bool ProcessMatches(uint pid, TargetIdentity expected,bool cache=true)
         {
             if (pid == 0 || pid == OwnPid || expected == null) return false;
             IntPtr process = OpenProcess(QueryLimitedInformation, false, pid);
@@ -926,7 +928,7 @@ namespace DragonLauncher
                 ProcessIdentity cached;
                 // Creation time is checked even on a cache hit, so a recycled PID
                 // cannot inherit permission from a different application.
-                if (ProcessCache.TryGetValue(pid, out cached) && cached.Created == created.Value &&
+                if (cache && ProcessCache.TryGetValue(pid, out cached) && cached.Created == created.Value &&
                     string.Equals(cached.Key, expected.Key, StringComparison.OrdinalIgnoreCase) &&
                     now - cached.CheckedAt < 1500) return cached.Matches;
 
@@ -952,20 +954,22 @@ namespace DragonLauncher
                 }
                 // No process handles remain cached. Bound memory even if many
                 // unrelated visible processes appear during a slow startup.
-                if (ProcessCache.Count > 256) ProcessCache.Clear();
-                ProcessCache[pid] = new ProcessIdentity
-                {
-                    Created = created.Value, Key = expected.Key, Matches = matches, CheckedAt = now
-                };
+                if(cache){
+                    if (ProcessCache.Count > 256) ProcessCache.Clear();
+                    ProcessCache[pid] = new ProcessIdentity
+                    {
+                        Created = created.Value, Key = expected.Key, Matches = matches, CheckedAt = now
+                    };
+                }
                 return matches;
             }
             finally { CloseHandle(process); }
         }
 
-        private static bool WindowMatches(IntPtr hwnd, TargetIdentity expected)
+        private static bool WindowMatches(IntPtr hwnd, TargetIdentity expected,bool cache=true)
         {
             uint pid;
-            return IsWindow(hwnd) && GetWindowThreadProcessId(hwnd, out pid) != 0 && ProcessMatches(pid, expected);
+            return IsWindow(hwnd) && GetWindowThreadProcessId(hwnd, out pid) != 0 && ProcessMatches(pid, expected,cache);
         }
 
         private static bool IsVerified(IntPtr hwnd)
@@ -994,6 +998,38 @@ namespace DragonLauncher
         internal static void RegisterBridgeTarget(BridgeClientIdentity identity)
         {if(identity==null)throw new ArgumentNullException("identity");bridgeTarget=identity;}
 
+        // Called only before native placement begins, with no observation in
+        // flight. A fresh cold route must not inherit a former client's binding.
+        internal static void ClearUncommittedBridgeTarget()
+        {bridgeTarget=null;VerifiedTargets.Clear();ProcessCache.Clear();}
+
+        internal sealed class ReplayCandidate
+        {
+            internal readonly IntPtr Window;
+            private readonly TargetIdentity expected;
+            private ReplayCandidate(IntPtr window,TargetIdentity identity){Window=window;expected=identity;}
+            internal static ReplayCandidate Find(Settings settings,BridgeClientIdentity binding)
+            {
+                TargetIdentity identity=FromSettings(settings,binding);
+                IntPtr window=FindTargetCore(identity,0,false);
+                return window==IntPtr.Zero?null:new ReplayCandidate(window,identity);
+            }
+            internal bool IsCurrent {get{return WindowMatches(Window,expected,false);}}
+            internal bool IsMinimized {get{return IsCurrent&&IsIconic(Window);}}
+            internal bool Commit()
+            {
+                if(!IsCurrent)return false;
+                bridgeTarget=expected.Bound;
+                if(VerifiedTargets.Count>64)VerifiedTargets.Clear();
+                VerifiedTargets[Window]=expected;return true;
+            }
+        }
+
+        // Observations keep their identity local and never write either shared
+        // native cache. A late observation has no publication to roll back.
+        internal static ReplayCandidate FindReplayCandidate(Settings settings,BridgeClientIdentity binding)
+        {try{return ReplayCandidate.Find(settings,binding);}catch{return null;}}
+
         internal static CompactPlacement PrepareTargetInOverlay(IntPtr target,Window film,int timeoutMilliseconds = 2000,ExistingReplayTarget replay=null)
         { return new CompactPlacement(target,film,timeoutMilliseconds,replay); }
 
@@ -1016,10 +1052,11 @@ namespace DragonLauncher
 
         /// <summary>Returns only a window whose executable or package identity matches the configuration.</summary>
         internal static IntPtr FindTarget(Settings settings, uint activatedPid)
+        {try{return FindTargetCore(FromSettings(settings),activatedPid,true);}catch{return IntPtr.Zero;}}
+        private static IntPtr FindTargetCore(TargetIdentity expected,uint activatedPid,bool publish)
         {
             try
             {
-                TargetIdentity expected = FromSettings(settings);
                 if (expected == null) return IntPtr.Zero;
                 IntPtr foreground = GetForegroundWindow(), best = IntPtr.Zero;
                 IntPtr initialHidden=IntPtr.Zero;int hiddenCount=0;
@@ -1034,7 +1071,7 @@ namespace DragonLauncher
                     bool matches;
                     if (!passMatches.TryGetValue(pid, out matches))
                     {
-                        matches = ProcessMatches(pid, expected);
+                        matches = ProcessMatches(pid, expected,publish);
                         passMatches[pid] = matches;
                     }
                     if (!matches) return true;
@@ -1052,8 +1089,8 @@ namespace DragonLauncher
                 // Only the Host's initial-hide lease can authorize a hidden
                 // target. Warm discovery and arbitrary hidden Electron utility
                 // windows never gain this capability. Ambiguity fails closed.
-                if(best==IntPtr.Zero&&hiddenCount==1&&initialHidden!=IntPtr.Zero&&IsInitialHiddenCandidate(initialHidden,expected)&&WindowMatches(initialHidden,expected)&&HasInitialHiddenLease(initialHidden,expected))best=initialHidden;
-                if (best != IntPtr.Zero)
+                if(best==IntPtr.Zero&&hiddenCount==1&&initialHidden!=IntPtr.Zero&&IsInitialHiddenCandidate(initialHidden,expected)&&WindowMatches(initialHidden,expected,publish)&&HasInitialHiddenLease(initialHidden,expected))best=initialHidden;
+                if (best != IntPtr.Zero && publish)
                 {
                     if (VerifiedTargets.Count > 64) VerifiedTargets.Clear();
                     VerifiedTargets[best] = expected;
@@ -1085,10 +1122,13 @@ namespace DragonLauncher
             return rect.Width>=64&&rect.Height>=64?CandidateExclusion.None:CandidateExclusion.TooSmall;
         }
         internal static string DescribeTargetAvailability(Settings settings)
+        {try{return DescribeTargetAvailabilityCore(FromSettings(settings),true);}catch{return "targetAvailability=unavailable";}}
+        internal static string DescribeReplayAvailability(Settings settings,BridgeClientIdentity binding)
+        {try{return DescribeTargetAvailabilityCore(FromSettings(settings,binding),false);}catch{return "targetAvailability=unavailable";}}
+        private static string DescribeTargetAvailabilityCore(TargetIdentity expected,bool cache)
         {
             try
             {
-                TargetIdentity expected=FromSettings(settings);
                 if(expected==null)return "targetIdentity=unavailable";
                 int verified=0,visible=0,hidden=0,cloaked=0,eligible=0;
                 int minimized=0,ownedRejected=0,childRejected=0,toolRejected=0,cloakedRejected=0,rectUnavailable=0,sizeRejected=0,stateChanged=0;
@@ -1098,7 +1138,7 @@ namespace DragonLauncher
                     uint pid;GetWindowThreadProcessId(hwnd,out pid);
                     bool matches;
                     if(!passMatches.TryGetValue(pid,out matches))
-                    {matches=ProcessMatches(pid,expected);passMatches[pid]=matches;}
+                    {matches=ProcessMatches(pid,expected,cache);passMatches[pid]=matches;}
                     if(!matches)return true;
                     verified++;
                     bool visibleNow=IsWindowVisible(hwnd);

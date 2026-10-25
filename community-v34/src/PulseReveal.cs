@@ -65,7 +65,7 @@ namespace DragonLauncher
             var controls = new Canvas();
             dismiss = new Button { Content = "×", FontSize = 24, Foreground = Brushes.LightBlue,
                 Background = Brushes.Transparent, BorderThickness = new Thickness(0), Width = 48, Height = 48,
-                ToolTip = "关闭动画并返回已准备的 Codex", Focusable = true };
+                ToolTip = "跳过动画，继续启动 Codex 和壁纸", Focusable = true };
             dismiss.Click += delegate { if(Dismissed!=null)Dismissed(this,EventArgs.Empty); };
             controls.Children.Add(dismiss);layers.Children.Add(controls);Content=layers;
             SourceInitialized += OnSourceInitialized;

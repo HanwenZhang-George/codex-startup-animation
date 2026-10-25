@@ -1,7 +1,26 @@
-Codex Dragon — community startup animation and dynamic wallpaper
-Portable V34-r13 reliability and shell-layout test candidate for Windows 10/11 x64
+﻿Codex Dragon — community startup animation and dynamic wallpaper
+Portable V34-r16 early-dismissal reliability test candidate for Windows 10/11 x64
 
 STATUS
+R16 continues from the hash-verified, frozen R15 full test ZIP.
+Early movie/pulse close buttons and normal window closure now use the same
+wallpaper-preserving skip intent as ESC, including pending preparation and a
+late authenticated host. They do not start a second client or override an earlier
+disable. Preview, terminal failure and system-session ending remain separate.
+Focused tests exercise the actual closing callbacks and the production host
+preparation/control flow with synthetic IPC, not only command acknowledgement.
+Diagnostics retain fixed dismissal sources and distinguish provisional layout
+observations from terminal layout failure. Original media, quality, renderer,
+resource limits, R15 warm-start classification and registered-root support remain.
+The affected computer still needs to accept this candidate before publication.
+
+Retained R15 behavior:
+All real official starts classify current process/window and same-directory host
+before animation. Background-only clients receive at most one bounded official
+activation. Unmanaged ordinary clients require a normal full exit and explicit
+Retry; managed replays preserve the existing generation and pause/disable state.
+
+Historical R13 behavior retained:
 R13 continues from the sealed R12 public candidate. Cold target discovery now
 uses a bounded adaptive response allowance (2 to 4 seconds), within one absolute
 30-second horizon; attach is issued once, capped at 12 seconds and remaining time.
@@ -113,9 +132,14 @@ with no automatic elevation or run-as-administrator flag for everyday use.
 Use the installed Uninstall.ps1 to restore the verified original shortcut before
 removing the installation. Never delete the installed directory while its shortcut
 is bound. If ownership checks fail, preserve the files and resolve the conflict.
-If Codex is already running, Launch.exe replays the existing-start flow. A running
-Codex that was started without the wallpaper host cannot safely gain the host
-after the fact: exit it normally and launch through Launch.exe next time.
+If Codex is already running with this directory's authenticated host, Launch.exe
+replays the existing-start flow and preserves pause/disable state. Background-only
+official processes receive at most one bounded official activation to recover a
+usable window. A client without this directory's trusted wallpaper connection
+cannot gain the private startup pipe after the fact. The launcher explains this
+and offers Retry/Cancel: save work, fully quit Codex normally, then choose Retry.
+Closing only a window may leave background processes. Cancel does not stop Codex.
+No process is forcibly stopped and no repeated automatic restart is attempted.
 ESC skips the startup animation; the original host flow retains the wallpaper.
 The r7 replay path requests only read/query and synchronization process rights,
 while retaining process-generation, registered-package and executable checks.
