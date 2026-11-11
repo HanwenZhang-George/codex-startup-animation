@@ -34,7 +34,15 @@ try {
   check((await status()).layoutSupported);
   check((await status()).layoutSurfaceKind, 'main');
   await page.evaluate(() => document.documentElement.setAttribute('data-codex-dragon-background', 'v1'));
-  check(await page.locator('#composer').evaluate(node => getComputedStyle(node).backgroundColor.includes('/ 0.6)')));
+  const paint = await page.locator('#composer').evaluate(node => {
+    const color = getComputedStyle(node).backgroundColor;
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+    const context = canvas.getContext('2d'); context.fillStyle = color; context.fillRect(0, 0, 1, 1);
+    return { color, alpha: context.getImageData(0, 0, 1, 1).data[3],
+      reducedTransparency: matchMedia('(prefers-reduced-transparency: reduce)').matches,
+      highContrast: matchMedia('(prefers-contrast: more)').matches };
+  });
+  assert.equal(paint.alpha, 153, JSON.stringify(paint)); checks++;
   await page.locator('textarea').fill('Synthetic input');
   check(await page.locator('textarea').inputValue(), 'Synthetic input');
   await page.evaluate(() => document.getElementById('send').onclick = () => window.syntheticClicked = true);
