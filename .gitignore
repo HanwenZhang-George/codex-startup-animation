@@ -22,6 +22,8 @@ assets/
 profiles/
 .codex/
 .cache/
+macos/media/
+node_modules/
 
 # The full, hash-verified media and binaries are shipped together in a GitHub
 # Release ZIP. Keep this Git source tree small and independently auditable.

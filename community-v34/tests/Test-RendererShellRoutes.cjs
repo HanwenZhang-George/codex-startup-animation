@@ -23,6 +23,9 @@ let browser;const started=Date.now();const deadline=setTimeout(()=>{if(browser)v
 (async()=>{
  browser=await chromium.launch({executablePath:process.env.CHROME_BIN||path.join(process.env.ProgramFiles,'Google/Chrome/Application/chrome.exe'),headless:true,timeout:5000,args:['--disable-background-networking','--disable-component-update','--no-first-run']});
  const context=await browser.newContext({viewport:{width:1000,height:700}});await context.route('**/*',r=>r.abort());const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(String(e)));page.setDefaultTimeout(2500);
+ // CI macOS images can enable reduced transparency globally. The glass
+ // assertions use an explicit browser preference; accessibility is tested below.
+ const mediaSession=await context.newCDPSession(page);await mediaSession.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-transparency',value:'no-preference'}]});
  const status=()=>page.evaluate(()=>__codexDragonWallpaperV1.status());
  async function setup(mutate=null,html=shell){await page.setContent('<html><head><style>'+css+'</style></head><body>'+html+'</body></html>');if(mutate)await page.evaluate(mutate);const installed=await page.evaluate(source);check('Install '+report.checks.length,installed.ok);return status();}
  let s=await setup();check('Official frame route without conversation main supported',s.layoutSupported);check('Frame surface kind',s.layoutSurfaceKind,'frame');check('Frame reason',s.layoutReason,'ready');boundedAudit(s);check('Known frame audit evidence',audit(s),{FrameCount:1,ActiveFrameCount:1,AnyMainCount:0,ActiveAnyMainCount:0,PageSurfaceFrameCount:1,LayoutTokenValid:1,PageLayoutTokenValid:1,FrameHashMatches:1,PageSurfaceFlag:1,DirectRowCount:1,DecorationCount:1,DecorationValid:1,ComposerCount:1,ComposerAmbiguous:0});
@@ -30,7 +33,9 @@ let browser;const started=Date.now();const deadline=setTimeout(()=>{if(browser)v
  await page.evaluate(()=>document.documentElement.setAttribute('data-codex-dragon-background','v1'));
  check('Audited inert page surface cleared',await page.locator('#decoration').evaluate(n=>getComputedStyle(n).backgroundColor),'rgba(0, 0, 0, 0)');
  await page.evaluate(()=>document.getElementById('decoration').className='_PageSurface_test_99');check('Changed decoration token stays supported',(await status()).layoutSupported);check('Changed decoration binding refreshed',await page.locator('#decoration').evaluate(n=>getComputedStyle(n).backgroundColor),'rgba(0, 0, 0, 0)');
- check('Frame composer keeps original glass alpha',await page.locator('#composer').evaluate(n=>getComputedStyle(n).backgroundColor.includes('/ 0.6)')));
+ // Chrome may serialize color-mix as color(srgb ...) or rgba(...). Check the
+ // painted alpha rather than one serialization, without relaxing the 60% gate.
+ check('Frame composer keeps original glass alpha',await page.locator('#composer').evaluate(n=>{const c=document.createElement('canvas');c.width=c.height=1;const x=c.getContext('2d');x.fillStyle=getComputedStyle(n).backgroundColor;x.fillRect(0,0,1,1);return x.getImageData(0,0,1,1).data[3];}),153);
  await page.locator('textarea').fill('Synthetic test');check('Typing preserved',await page.locator('textarea').inputValue(),'Synthetic test');await page.evaluate(()=>document.getElementById('send').onclick=()=>window.clicked=true);await page.locator('#send').click();check('Click preserved',await page.evaluate(()=>window.clicked));
  const malformed=[
  ['frame-token',()=>document.getElementById('frame').className='unknown'],

@@ -1,0 +1,50 @@
+name: macOS build and offline tests
+
+on:
+  pull_request:
+    paths:
+      - 'macos/**'
+      - 'community-v34/renderer.js'
+      - 'community-v34/media-manifest.json'
+      - 'community-v34/tests/**'
+      - '.github/workflows/macos.yml'
+  push:
+    paths:
+      - 'macos/**'
+      - 'community-v34/renderer.js'
+      - 'community-v34/media-manifest.json'
+      - 'community-v34/tests/**'
+      - '.github/workflows/macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: macos/package-lock.json
+      - name: Install test dependencies
+        working-directory: macos
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build universal launcher and verify original media
+        run: ./macos/scripts/build.sh
+      - name: Verify native bundle and decode an original video frame
+        run: ./macos/scripts/test.sh --offline
+      - name: Test legacy and modern renderer layouts with original videos
+        run: ./macos/scripts/test-renderer.sh
+      - name: Verify Dock binding and restore in an isolated preferences domain
+        run: python3 macos/tests/dock-binding.py

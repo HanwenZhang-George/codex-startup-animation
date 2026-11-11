@@ -1,5 +1,9 @@
 # Codex 龙娘启动动画与动态壁纸 · 社区 R16
 
+## macOS 适配（源码）
+
+[Mac 版说明](macos/README.md)：提供 macOS 13+ 的原生启动器、原版启动与流泪视频、Codex 内常态／粒子动态壁纸、玻璃输入框、跳过、预览和菜单栏控制。包含 Apple Silicon / Intel 两种编译目标，Intel 尚无实机验证。通过私有管道连接官方客户端；首次使用前完整退出 Codex，再从新启动器打开。目前提供源码与本地构建脚本，下面的 Windows 发布包不包含 Mac 程序。构建与兼容范围见该说明。
+
 **当前完整包为用户测试通过的 R16，按验收 ZIP 原字节发布。** 原发布页和下载直链保持不变；文件名中的 `r5` 用于保留原地址，实际程序版本为 **34.16.0.0**。
 
 [下载完整 Windows x64 包](https://github.com/HanwenZhang-George/codex-startup-animation/releases/download/community-v34-r5/CodexDragon-V34-Portable-Windows-x64-r5.zip) · [固定发布页](https://github.com/HanwenZhang-George/codex-startup-animation/releases/tag/community-v34-r5) · [故障排查与反馈教程](TROUBLESHOOTING.md) · [验证记录](VERIFICATION.txt)

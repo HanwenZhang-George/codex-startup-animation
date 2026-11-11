@@ -13,6 +13,7 @@ let browser;const started=Date.now(),deadline=setTimeout(()=>{if(browser)void br
 (async()=>{
  browser=await chromium.launch({executablePath:process.env.CHROME_BIN||path.join(process.env.ProgramFiles,'Google/Chrome/Application/chrome.exe'),headless:true,timeout:5000,args:['--disable-background-networking','--disable-component-update','--no-first-run']});
  const context=await browser.newContext({viewport:{width:1000,height:700}});await context.route('**/*',r=>r.abort());const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(String(e)));page.setDefaultTimeout(2500);
+ const mediaSession=await context.newCDPSession(page);await mediaSession.send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-transparency',value:'no-preference'}]});
  const status=()=>page.evaluate(()=>__codexDragonWallpaperV1.status());
  async function visible(){await page.waitForFunction(()=>{const s=__codexDragonWallpaperV1.status();return s.playing&&s.firstFrameConfirmed&&s.stageVisible;},null,{timeout:7000});}
  await page.setContent('<html><head><style>html,body,#root,main{width:100%;height:100%;margin:0}</style></head><body><div id="root"><main class="_MainContentSurface_test_2" data-app-shell-main-surface="default"><div class="_WorkspaceContent_test_2"></div></main></div></body></html>');
