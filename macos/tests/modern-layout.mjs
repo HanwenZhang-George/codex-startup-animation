@@ -14,6 +14,11 @@ let checks = 0;
 function check(actual, expected = true) { assert.deepEqual(actual, expected); checks++; }
 try {
   const page = await browser.newPage();
+  const media = await page.context().newCDPSession(page);
+  const transparency = value => media.send('Emulation.setEmulatedMedia', { features: [
+    { name: 'prefers-reduced-transparency', value }, { name: 'prefers-contrast', value: 'no-preference' },
+  ] });
+  await transparency('no-preference');
   await page.route('**/*', route => route.abort());
   const shell = `<div id="root"><div class="Layout-SYw9n4 PageSurfaceLayout-oqnRfB" data-app-shell-frame="true" data-app-shell-page-surface="true">
     <div data-app-shell-workspace-row="true"><div class="Workspace-IfYAxV">
@@ -43,6 +48,17 @@ try {
       highContrast: matchMedia('(prefers-contrast: more)').matches };
   });
   assert.equal(paint.alpha, 153, JSON.stringify(paint)); checks++;
+  check(paint.reducedTransparency, false);
+  check(paint.highContrast, false);
+  const alpha = () => page.locator('#composer').evaluate(node => {
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+    const context = canvas.getContext('2d'); context.fillStyle = getComputedStyle(node).backgroundColor;
+    context.fillRect(0, 0, 1, 1); return context.getImageData(0, 0, 1, 1).data[3];
+  });
+  await transparency('reduce');
+  check(await alpha(), 255);
+  await transparency('no-preference');
+  check(await alpha(), 153);
   await page.locator('textarea').fill('Synthetic input');
   check(await page.locator('textarea').inputValue(), 'Synthetic input');
   await page.evaluate(() => document.getElementById('send').onclick = () => window.syntheticClicked = true);
