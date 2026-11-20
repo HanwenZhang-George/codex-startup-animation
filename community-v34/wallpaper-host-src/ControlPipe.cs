@@ -15,13 +15,13 @@ internal sealed class HostState {
     internal readonly object Gate=new object();
     internal readonly int HostPid;
     internal readonly long HostCreated;
-    internal HostState(){using(var process=Process.GetCurrentProcess()){HostPid=process.Id;HostCreated=process.StartTime.ToUniversalTime().ToFileTimeUtc();}}
+    internal HostState(){DocumentGeneration=Guid.NewGuid().ToString("N");using(var process=Process.GetCurrentProcess()){HostPid=process.Id;HostCreated=process.StartTime.ToUniversalTime().ToFileTimeUtc();}}
     internal int Disposition,CodexPid,MediaCode;internal long Created;
     internal bool Ready,Revealed,Disabled,RequestedReveal,RequestedPause,RevealEverRequested;
     internal int DiagnosticsVersion,MediaTimeMs;
     internal bool LayoutSupported,ProbeOnly,Attached,Playing,WallpaperApplied,FirstFrameConfirmed,DocumentHidden,StageVisible,MemoryPressure;
     internal bool RefreshAvailable;internal long RefreshRequested,RefreshTaken,RefreshCompleted;int refreshResult;
-    internal readonly string DocumentGeneration=Guid.NewGuid().ToString("N");
+    internal string DocumentGeneration {get;private set;}
     internal long MediaGeneration,ObservedAt,Sequence,RendererClockMs,RendererSampleReceived;internal string ActualPhase="preparing",Health="stale",DesiredMode="enabled",Reason="",PrepareOperationId="";
     internal bool CommitAccepted,Prepared;internal string RequestedPrepare,RequestedCommit;
     internal long OperationRequested,OperationCompleted,IntentRevision,OperationStartedAt;internal int OperationTimeout;int operationResult;
@@ -46,6 +46,11 @@ internal sealed class HostState {
     }}
     internal void EndRefresh(){lock(Gate){RefreshAvailable=false;Monitor.PulseAll(Gate);}}
     internal void Stale(string reason){lock(Gate){Health="stale";Reason=reason;Ready=false;Prepared=false;Sequence++;Monitor.PulseAll(Gate);}Work.Set();}
+    internal void FollowStartupPage(){lock(Gate){
+        DocumentGeneration=Guid.NewGuid().ToString("N");
+        ClearDiagnostics();ObservedAt=RendererSampleReceived=0;Sequence++;
+        Monitor.PulseAll(Gate);
+    }}
     internal string OperationSnapshot(string command,string operation,int timeout){lock(Gate){
         if(Disabled||DesiredMode!="enabled"||!RefreshAvailable)return Snapshot(2);
         long request=++OperationRequested;if(command=="prepare")RequestedPrepare=operation;else RequestedCommit=operation;

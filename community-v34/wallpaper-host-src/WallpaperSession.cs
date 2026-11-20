@@ -92,7 +92,13 @@ internal static class MediaFileBinding {
     }
 }
 internal sealed class WallpaperSession {
-    readonly CdpTransport cdp;readonly HostState state;readonly Configuration config;readonly bool isolated;string session;bool installed,disposed;int phase;
+    readonly CdpTransport cdp;readonly HostState state;readonly Configuration config;readonly bool isolated;
+    readonly object targetGate=new object();
+    readonly HashSet<string> retiredTargets=new HashSet<string>(StringComparer.Ordinal);
+    volatile string session;
+    string startupTargetId;
+    int lostTargetKind;
+    bool installed,disposed;int phase;
     readonly Func<WaitHandle,MemoryPressureMonitor> memoryFactory=MemoryPressureMonitor.Create;
     readonly Stopwatch preparationClock=Stopwatch.StartNew();volatile bool transportLost,targetLost;long observationStarted,observationReceived;MemoryPressureMonitor preparationMemory;
     bool mediaAttachStarted,preparationPressured;int lossEvidenceMask;
@@ -124,7 +130,19 @@ internal sealed class WallpaperSession {
     internal WallpaperSession(CdpTransport transport,HostState status,Configuration settings,bool test){cdp=transport;state=status;config=settings;isolated=test;}
     void OnSignal(string kind,string eventSession){
         if(kind=="transport-fault"){RecordLoss("transport-fault");transportLost=true;state.Stale(kind);}
-        else if(session!=null&&eventSession==session){if(kind=="target-lost"){RecordLoss(cdp.TargetLossKind==1?"target-detached":cdp.TargetLossKind==2?"target-crashed":cdp.TargetLossKind==3?"inspector-detached":"unknown");targetLost=true;state.Stale(kind);}state.Work.Set();}
+        else if(kind=="target-lost")ObserveTargetLoss(eventSession);
+        else if(eventSession!=null&&eventSession==session)state.Work.Set();
+    }
+    void ObserveTargetLoss(string eventSession){
+        lock(targetGate){
+            if(eventSession==null||eventSession!=session)return;
+            int kind=cdp.LossForSession(eventSession);
+            if(kind==0)return;
+            RecordLoss(kind==1?"target-detached":kind==2?"target-crashed":"inspector-detached");
+            if(lostTargetKind==0||kind!=1)lostTargetKind=kind;
+            targetLost=true;
+            state.Stale("target-lost");
+        }
     }
     void RecordLoss(string kind){
         // Preserve a later crash notification after detach, but never emit an
@@ -142,9 +160,9 @@ internal sealed class WallpaperSession {
     internal static string Guard(string inner){
         return "(() => {let targetAccepted=false,guardMask=0;try{const u=new URL(location.href),q=Array.from(u.searchParams.entries());guardMask=64;if(u.protocol==='app:')guardMask|=1;if(u.hostname==='-')guardMask|=2;if(u.pathname==='/index.html')guardMask|=4;if(!u.port&&!u.username&&!u.password)guardMask|=8;if(!u.hash)guardMask|=16;if((!q.length&&!u.search)||(q.length===1&&q[0][0]==='initialRoute'&&q[0][1].length<=2048&&q[0][1].startsWith('/')&&!q[0][1].startsWith('//')&&!/[\\x00-\\x1f\\x7f]/.test(q[0][1])))guardMask|=32;targetAccepted=guardMask===127;}catch{}if(!targetAccepted)return {targetAccepted:false,guardMask};return ("+inner.Trim().TrimEnd(';')+");})()";
     }
-    Dictionary<string,object> Eval(string expression,bool promise,int timeout){
+    Dictionary<string,object> Eval(string expression,bool promise,int timeout,bool classifyExecutionContext=false){
         observationStarted=Stopwatch.GetTimestamp();
-        var m=cdp.Send("Runtime.evaluate",Json.Obj("expression",Guard(expression),"returnByValue",true,"awaitPromise",promise,"userGesture",false),session,timeout);
+        var m=cdp.Send("Runtime.evaluate",Json.Obj("expression",Guard(expression),"returnByValue",true,"awaitPromise",promise,"userGesture",false),session,timeout,classifyExecutionContext);
         observationReceived=Stopwatch.GetTimestamp();
         if(Json.Get(m,"exceptionDetails")!=null)throw new HostFailure(60);
         var result=Json.Map(Json.Get(m,"result"));var value=Json.Map(Json.Get(result,"value"));
@@ -217,7 +235,7 @@ internal sealed class WallpaperSession {
             if(left<=0)throw new HostFailure(kind==1?63:kind==2?66:68);
             int requestBudget=Math.Min(1500,left);var request=Stopwatch.StartNew();int code=199,stage=0;
             Dictionary<string,object> status=null;HostFailure retry=null;
-            try{status=Eval(expression,false,requestBudget);code=0;}
+            try{status=Eval(expression,false,requestBudget,kind==1&&retiredTargets.Count>0);code=0;}
             catch(HostFailure error){
                 code=100+error.Code;stage=error.TimeoutStage;
                 if(error.Code!=37||stage!=3)throw;retry=error;
@@ -248,50 +266,89 @@ internal sealed class WallpaperSession {
         finally{PreparationDiagnostics.RecordTargetRequest(kind,request.ElapsedMilliseconds,budget,code,stage,cdp);}
     }
     const int ColdTargetBudgetMilliseconds=30000,TargetReadBudgetMilliseconds=2000,SlowTargetReadBudgetMilliseconds=4000,TargetAttachBudgetMilliseconds=12000;
-    void WaitForTarget(Stopwatch clock,int delay){
+    const int StartupPageBudgetMilliseconds=48000,MaximumStartupPageReplacements=2,MaximumReplacementRootRetries=3;
+    void WaitForTarget(Stopwatch clock,int budget,int delay){
         var wait=Stopwatch.StartNew();
         // Bounded, non-spinning waits; do not consume control notifications.
         while(!Disabled&&!cdp.Faulted){
-            int left=Math.Min(Deadline.Remaining(ColdTargetBudgetMilliseconds,clock.ElapsedMilliseconds),Deadline.Remaining(delay,wait.ElapsedMilliseconds));
+            int left=Math.Min(Deadline.Remaining(budget,clock.ElapsedMilliseconds),Deadline.Remaining(delay,wait.ElapsedMilliseconds));
             if(left<=0)return;Thread.Sleep(Math.Min(50,left));
         }
     }
     void SelectTarget(){
         // A cold official process may expose its page after the old 12-second
-        // discovery limit. This one absolute horizon includes every read, wait
-        // and the single attach; it never resets or changes the film's deadline.
+        // discovery limit. Every read, wait and attach shares the selection
+        // horizon and stays inside the overall startup page budget.
         var clock=Stopwatch.StartNew();string id=null;int readBudget=TargetReadBudgetMilliseconds;
-        while(clock.ElapsedMilliseconds<ColdTargetBudgetMilliseconds&&!Disabled){
+        int budget=Math.Min(ColdTargetBudgetMilliseconds,Deadline.Remaining(StartupPageBudgetMilliseconds,preparationClock.ElapsedMilliseconds));
+        while(clock.ElapsedMilliseconds<budget&&!Disabled){
             CheckPreparationResources();
-            int left=Deadline.Remaining(ColdTargetBudgetMilliseconds,clock.ElapsedMilliseconds);if(left<=0)break;
+            int left=Deadline.Remaining(budget,clock.ElapsedMilliseconds);if(left<=0)break;
             Dictionary<string,object> response;
             try{response=TargetRequest(1,Json.Obj(),Math.Min(readBudget,left));}
             catch(HostFailure error){
                 // Only this idempotent discovery read can be replayed after a
                 // reply timeout. Pipe/write/protocol faults remain terminal.
                 if(error.Code!=37||error.TimeoutStage!=3||cdp.Faulted||Disabled||transportLost)throw;
-                if(Deadline.Remaining(ColdTargetBudgetMilliseconds,clock.ElapsedMilliseconds)<=0)throw;
+                if(Deadline.Remaining(budget,clock.ElapsedMilliseconds)<=0)throw;
                 // Repeating the same 2-second limit would discard every reply
                 // from a browser consistently taking slightly longer. Wait up
                 // to 4 seconds for the NEXT fresh request, never accept an old
                 // timed-out ID. A healthy reply resets the ordinary read limit.
                 readBudget=SlowTargetReadBudgetMilliseconds;
-                WaitForTarget(clock,200);continue;
+                WaitForTarget(clock,budget,200);continue;
             }
             readBudget=TargetReadBudgetMilliseconds;
             var values=Json.Get(response,"targetInfos") as IEnumerable;if(values==null)throw new HostFailure(62);
-            int found=0;foreach(var value in values){var target=value as Dictionary<string,object>;if(target!=null&&AcceptedTarget(target)){found++;id=Json.Text(target,"targetId");}}
-            if(found>1)throw new HostFailure(62);if(found==1)break;WaitForTarget(clock,500);
+            int found=0;bool retiredPresent=false;
+            foreach(var value in values){
+                var target=value as Dictionary<string,object>;
+                if(target==null||!AcceptedTarget(target))continue;
+                string candidate=Json.Text(target,"targetId");
+                if(retiredTargets.Contains(candidate))retiredPresent=true;
+                else{found++;id=candidate;}
+            }
+            if(found>1)throw new HostFailure(62);
+            if(found==1&&!retiredPresent)break;
+            id=null;WaitForTarget(clock,budget,500);
         }
         CheckPreparationResources();
-        int remaining=Deadline.Remaining(ColdTargetBudgetMilliseconds,clock.ElapsedMilliseconds);
+        int remaining=Deadline.Remaining(budget,clock.ElapsedMilliseconds);
         if(id==null||Disabled||transportLost||remaining<=0)throw new HostFailure(62);
-        // Attach mutates CDP state: issue it ONCE, using only the time left in
-        // the same startup budget. A timeout must never attach a second time.
-        var attached=TargetRequest(2,Json.Obj("targetId",id,"flatten",true),Math.Min(TargetAttachBudgetMilliseconds,remaining));session=Json.Text(attached,"sessionId");
-        if(!Regex.IsMatch(session??"","^[A-Za-z0-9_-]{1,128}$"))throw new HostFailure(62);
+        // Issue one attach per target. Only a browser-confirmed detach can
+        // authorize a later attachment to a different verified page.
+        var attached=TargetRequest(2,Json.Obj("targetId",id,"flatten",true),Math.Min(TargetAttachBudgetMilliseconds,remaining));
+        string attachedSession=Json.Text(attached,"sessionId");
+        if(!Regex.IsMatch(attachedSession??"","^[A-Za-z0-9_-]{1,128}$"))throw new HostFailure(62);
+        lock(targetGate){
+            startupTargetId=id;
+            session=attachedSession;
+            // The reader can see the detach while this thread wakes from Send.
+            ObserveTargetLoss(attachedSession);
+        }
     }
     void Prepare(){
+        for(;;){
+            try{PrepareAttempt();return;}
+            catch(HostFailure){if(!FollowReplacementStartupPage())throw;}
+        }
+    }
+    bool FollowReplacementStartupPage(){
+        lock(targetGate){
+            // No file binding or handoff can have been issued in phases 2–6.
+            // Leave transport failures, crashes and runtime detaches terminal.
+            if(phase<2||phase>6||lostTargetKind!=1||transportLost||cdp.Faulted||
+               cdp.ProcessExitState!=0||Disabled||retiredTargets.Count>=MaximumStartupPageReplacements||
+               Deadline.Remaining(StartupPageBudgetMilliseconds,preparationClock.ElapsedMilliseconds)<=0||
+               startupTargetId==null||!retiredTargets.Add(startupTargetId))return false;
+            session=null;startupTargetId=null;lostTargetKind=0;targetLost=false;
+            installed=false;
+            state.FollowStartupPage();
+        }
+        PreparationDiagnostics.RecordEvent(50,preparationClock.ElapsedMilliseconds,retiredTargets.Count,null);
+        return true;
+    }
+    void PrepareAttempt(){
         try{PrepareCore();}
         catch(PreparationSuspended){
             if(Disabled)return;
@@ -309,11 +366,19 @@ internal sealed class WallpaperSession {
     void PrepareCore(){
         CheckPreparationResources();
         SetPhase(1);SelectTarget();SetPhase(2);var shellClock=Stopwatch.StartNew();var clock=Stopwatch.StartNew();bool rootReady=false;HostFailure lastGuard=null;
-        while(clock.ElapsedMilliseconds<4000&&!Disabled){
+        int shellBudget=Math.Min(12000,Deadline.Remaining(StartupPageBudgetMilliseconds,preparationClock.ElapsedMilliseconds));
+        int rootBudget=Math.Min(4000,shellBudget),contextRetries=0;
+        while(clock.ElapsedMilliseconds<rootBudget&&!Disabled){
             CheckPreparationResources();
-            try{var ready=ReadPreparation(1,clock,4000);if(ready==null)return;if(Json.Bool(ready,"rootReady")&&Json.Bool(ready,"bodyReady")){rootReady=true;break;}}
-            catch(HostFailure e){if(e.Code<61000||e.Code>64999)throw;lastGuard=e;}
-            WaitForPreparation(clock,4000,200);
+            try{var ready=ReadPreparation(1,clock,rootBudget);if(ready==null)return;if(Json.Bool(ready,"rootReady")&&Json.Bool(ready,"bodyReady")){rootReady=true;break;}}
+            catch(HostFailure e){
+                // A replacement target can attach before its execution context
+                // exists. Only the guarded root read can wait for that context.
+                if(e.Code==CdpTransport.ExecutionContextUnavailable&&contextRetries<MaximumReplacementRootRetries)contextRetries++;
+                else if(e.Code>=61000&&e.Code<=64999)lastGuard=e;
+                else throw;
+            }
+            WaitForPreparation(clock,rootBudget,200);
         }
         if(Disabled)return;
         if(!rootReady&&lastGuard!=null)throw lastGuard;
@@ -333,10 +398,10 @@ internal sealed class WallpaperSession {
         // allowance. Fast root readiness leaves slack for a busy shell;
         // intervening mutations also spend this budget instead of resetting it.
         SetPhase(6);bool layout=false;
-        while(shellClock.ElapsedMilliseconds<12000&&!Disabled){
-            var observed=ReadPreparation(2,shellClock,12000);if(observed==null)return;
+        while(shellClock.ElapsedMilliseconds<shellBudget&&!Disabled){
+            var observed=ReadPreparation(2,shellClock,shellBudget);if(observed==null)return;
             layout=Json.Bool(observed,"layoutSupported");if(layout||isolated)break;
-            WaitForPreparation(shellClock,12000,250);
+            WaitForPreparation(shellClock,shellBudget,250);
         }
         if(Disabled)return;
         if(!layout&&!isolated)throw new HostFailure(66);if(Disabled)return;

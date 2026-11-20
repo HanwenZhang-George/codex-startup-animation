@@ -18,6 +18,11 @@ function boundedAudit(s){const keys=Object.keys(s).filter(key=>key.startsWith('l
 const composer='<div id="composer" class="_ComposerLayoutRoot_test2_8" data-composer-surface-variant="default"><textarea></textarea><button id="send">Send</button></div>';
 const main='<main id="main" class="_MainContentSurface_test_2" data-app-shell-main-surface="default"><div class="_WorkspaceContent_test_2">'+composer+'</div></main>';
 const shell='<div id="root"><div id="frame" class="_Layout_test_2 _PageSurfaceLayout_test_2" data-app-shell-frame="true" data-app-shell-page-surface="true"><div id="bar" class="_ApplicationMenuTopBar_test_2">Menu</div><div id="row" data-app-shell-workspace-row="true"><div id="decoration" class="_PageSurface_test_2" aria-hidden="true"></div><aside id="app-shell-sidebar" class="_LeftPanel_test_2"><nav data-app-navigation-rail>Navigation</nav></aside><section id="home">'+composer+'</section></div></div></div>';
+const currentClasses={
+ Layout:'WMJYvH',PageSurfaceLayout:'oqnRfB',PageSurface:'g2Llyi',MainContentSurface:'EnuIYE',
+ WorkspaceContent:'dnr6uY',ComposerLayoutRoot:'XCKS7O',ApplicationMenuTopBar:'RkT2pZ',LeftPanel:'Klq782'
+};
+const withCurrentClasses=html=>html.replace(/_([A-Za-z]+)_test2?_\d+/g,(_,name)=>name+'-'+currentClasses[name]);
 const css='html,body,#root,#frame{width:1000px;height:700px;margin:0}#frame{background:#202020}#row{height:650px;position:relative}#decoration{position:absolute;inset:0;background:#202020;pointer-events:none}#home{position:relative;padding:80px 120px}#composer{position:relative;background:var(--composer-layout-surface-background,#343646);backdrop-filter:var(--composer-layout-surface-backdrop-filter,none)}:root{--color-surface:#1d1e2c;--color-surface-elevated-secondary:#343646;color:#fff}';
 let browser;const started=Date.now();const deadline=setTimeout(()=>{if(browser)void browser.close();},27000);
 (async()=>{
@@ -32,6 +37,17 @@ let browser;const started=Date.now();const deadline=setTimeout(()=>{if(browser)v
  await page.evaluate(()=>document.getElementById('decoration').className='_PageSurface_test_99');check('Changed decoration token stays supported',(await status()).layoutSupported);check('Changed decoration binding refreshed',await page.locator('#decoration').evaluate(n=>getComputedStyle(n).backgroundColor),'rgba(0, 0, 0, 0)');
  check('Frame composer keeps original glass alpha',await page.locator('#composer').evaluate(n=>getComputedStyle(n).backgroundColor.includes('/ 0.6)')));
  await page.locator('textarea').fill('Synthetic test');check('Typing preserved',await page.locator('textarea').inputValue(),'Synthetic test');await page.evaluate(()=>document.getElementById('send').onclick=()=>window.clicked=true);await page.locator('#send').click();check('Click preserved',await page.evaluate(()=>window.clicked));
+ const currentShell=withCurrentClasses(shell),currentMain=withCurrentClasses(main);
+ s=await setup(null,currentShell);check('Current frame validates independent component hashes',s.layoutSurfaceKind,'frame');
+ await page.evaluate(()=>document.documentElement.setAttribute('data-codex-dragon-background','v1'));
+ check('Current frame decoration is transparent',await page.locator('#decoration').evaluate(n=>getComputedStyle(n).backgroundColor),'rgba(0, 0, 0, 0)');
+ s=await setup(null,'<div id="root">'+currentMain+'</div>');check('Current conversation layout is accepted',s.layoutSurfaceKind,'main');
+ await page.evaluate(()=>document.documentElement.setAttribute('data-codex-dragon-background','v1'));
+ check('Current composer receives translucent style',await page.locator('#composer').evaluate(n=>getComputedStyle(n).backgroundColor.includes('/ 0.6)')));
+ await page.evaluate(()=>document.querySelector('#main > div').className='_WorkspaceContent_test_2');
+ check('Mixed legacy and current shell classes are rejected',(await status()).layoutReason,'workspace-shape');
+ s=await setup(()=>document.getElementById('frame').className+=' Layout-abc123',currentShell);
+ check('Duplicate current layout tokens remain ambiguous',s.layoutReason,'frame-token');
  const malformed=[
  ['frame-token',()=>document.getElementById('frame').className='unknown'],
  ['frame-token',()=>document.getElementById('frame').setAttribute('data-app-shell-page-surface','false')],

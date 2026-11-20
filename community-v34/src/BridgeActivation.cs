@@ -729,6 +729,10 @@ namespace DragonLauncher
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] private static extern int GetPackageFamilyName(IntPtr process,ref uint length,StringBuilder family);
         internal static bool IsAlive(IntPtr process){uint code;return GetExitCodeProcess(process,out code) && code==259;}
         internal static bool HasExited(IntPtr process){return process!=IntPtr.Zero && WaitForSingleObject(process,0)==0;}
+        internal static void WaitForExit(SafeProcessHandle process,int milliseconds)
+        {
+            WaitForSingleObject(process.DangerousGetHandle(),(uint)milliseconds);
+        }
         internal static bool CreationTime(IntPtr process,out long created){long exited,kernel,user;return GetProcessTimes(process,out created,out exited,out kernel,out user);}
         internal static string ImagePath(IntPtr process)
         {

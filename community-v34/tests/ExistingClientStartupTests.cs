@@ -15,13 +15,14 @@ internal static class ExistingClientStartupTests {
     sealed class Target {internal bool Current=true;}
     sealed class Fixture {
         internal long Now;
-        internal int Finds,Activations,Inspections,Prompts,RunningChecks,Clears;
+        internal int Finds,Activations,Inspections,Prompts,RunningChecks,Clears,ExitWaits;
         internal Target Window=new Target();
         internal WarmHostState Host=WarmHostState.Managed;
         internal Func<int,Target> FindBehavior;
         internal Func<int,bool> RunningBehavior;
         internal Func<int,bool> RetryBehavior;
         internal Action<int> ActivationBehavior;
+        internal Func<int,bool> ExitBehavior;
         internal Action InspectionBehavior;
         internal readonly List<string> Logs=new List<string>();
         internal readonly List<bool> PromptStillRunning=new List<bool>();
@@ -32,6 +33,7 @@ internal static class ExistingClientStartupTests {
                 Find=scope=>{Finds++;Now+=10;return FindBehavior==null?Window:FindBehavior(Finds);},
                 IsCurrent=target=>target.Current,
                 IsRunning=()=>{RunningChecks++;Now+=10;return RunningBehavior==null||RunningBehavior(RunningChecks);},
+                WaitForDetachedClient=budget=>{ExitWaits++;return ExitBehavior!=null&&ExitBehavior(budget);},
                 Activate=budget=>{Activations++;ActivationBudgets.Add(budget);Now+=10;if(ActivationBehavior!=null)ActivationBehavior(budget);},
                 InspectHost=target=>{Inspections++;Now+=10;if(InspectionBehavior!=null)InspectionBehavior();return Host;},
                 AskRetry=still=>{Prompts++;PromptStillRunning.Add(still);Now+=12000;return RetryBehavior!=null&&RetryBehavior(Prompts);},
@@ -55,6 +57,20 @@ internal static class ExistingClientStartupTests {
         Check(r.Decision==WarmStartupDecision.Replay&&r.Reason=="window-recovered","background/orphan hint can recover a verified window");
         Check(f.Activations==1&&f.RunningChecks==1&&f.Finds==4,"recovery sends one activation and only observes thereafter");
         Check(f.ActivationBudgets[0]<=4000&&f.Now<=8000,"activation and observations fit original deadline");
+        f=new Fixture();f.FindBehavior=n=>null;f.RunningBehavior=n=>n==1;
+        f.ExitBehavior=budget=>{Check(budget==4000,"detached client grace has a fixed bound");f.Now+=2800;return true;};
+        r=f.Run();
+        Check(r.Decision==WarmStartupDecision.Cold&&r.Reason=="background-exit-complete","tray exit can finish during the first click");
+        Check(f.ExitWaits==1&&f.RunningChecks==2&&f.Activations==0&&f.Clears==1&&f.Prompts==0,"cold route requires fresh process absence without waking the departing client");
+        f=new Fixture();f.FindBehavior=n=>null;f.RunningBehavior=n=>n<=3;
+        f.ExitBehavior=budget=>{f.Now+=500;return true;};
+        r=f.Run();
+        Check(r.Decision==WarmStartupDecision.Cold&&r.Reason=="background-exit-complete","renderer processes can outlive the detached browser");
+        Check(f.RunningChecks==4&&f.Now>=1000&&f.Now<4000&&f.Activations==0&&f.Prompts==0,"wait for remaining processes inside the original grace period");
+        f=new Fixture();f.FindBehavior=n=>null;f.ExitBehavior=budget=>{f.Now+=budget;return true;};
+        r=f.Run();
+        Check(r.Decision==WarmStartupDecision.Cancelled&&f.Prompts==1&&f.PromptStillRunning[0],"a detached client still alive after the grace gets the existing retry dialog");
+        Check(f.RunningChecks==2&&f.Activations==0&&f.Clears==0,"pending tray exit never becomes a warm replay or blind cold start");
         f=new Fixture();f.FindBehavior=n=>null;r=f.Run();
         Check(r.Decision==WarmStartupDecision.Unavailable&&r.Reason=="window-timeout","persistent background cannot become cold fallback");
         Check(f.Activations==1&&f.Clears==0&&f.Prompts==0&&f.Now<=8000,"no-window deadline neither restarts nor prompts a hidden cover");
@@ -100,6 +116,9 @@ internal static class ExistingClientStartupTests {
         Check(r.Target==null&&f.Activations==0&&f.RunningChecks==1,"cold race remains delegated to existing locked host guard");
     }
     static void HostStatusCases(){
+        Check(ExistingClientStartup.IsDetachedHost(new BridgeStatus{Disposition=2,MediaCode=172,Disabled=true}),"verified host renderer loss can precede tray exit");
+        Check(!ExistingClientStartup.IsDetachedHost(new BridgeStatus{Disposition=2,MediaCode=6,Disabled=true}),"explicit wallpaper disable is not shutdown evidence");
+        Check(!ExistingClientStartup.IsDetachedHost(new BridgeStatus{Disposition=3,MediaCode=172,Disabled=true}),"an unowned client does not trigger the exit wait");
         Check(ExistingClientStartup.ClassifyManagedHost(new BridgeStatus{MediaCode=6,Disabled=true,DesiredMode="disabled"})==WarmHostState.Disabled,"actual processed user-disable code6 is disabled, not fault");
         Check(ExistingClientStartup.ClassifyManagedHost(new BridgeStatus{MediaCode=166,Disabled=true,DesiredMode="enabled"})==WarmHostState.Faulted,"terminal host failure remains faulted");
         Check(ExistingClientStartup.ClassifyManagedHost(new BridgeStatus{MediaCode=5,DesiredMode="user-paused"})==WarmHostState.Paused,"actual user pause remains paused");

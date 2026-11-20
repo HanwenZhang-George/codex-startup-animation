@@ -30,6 +30,7 @@ namespace DragonLauncher
         internal Func<WarmObservation,T> Find;
         internal Func<T,bool> IsCurrent;
         internal Func<bool> IsRunning;
+        internal Func<int,bool> WaitForDetachedClient;
         internal Action<int> Activate;
         internal Func<T,WarmHostState> InspectHost;
         internal Func<bool,bool> AskRetry;
@@ -42,6 +43,7 @@ namespace DragonLauncher
     internal static class ExistingClientStartup
     {
         internal const int AutomaticTimeoutMilliseconds=8000;
+        private const int DetachedClientExitMilliseconds=4000;
         internal static bool ShouldCoordinate(Settings settings,bool preview)
         {return !preview&&settings!=null&&String.IsNullOrWhiteSpace(settings.Exe)&&String.Equals(settings.AppId,BridgeClientIdentity.OfficialAppId,StringComparison.OrdinalIgnoreCase);}
         private static int Remaining(long deadline,long now)
@@ -94,6 +96,20 @@ namespace DragonLauncher
                 if(target==null){
                     if(!Observe(hooks,deadline,scope=>hooks.IsRunning()))
                         return Result(hooks,log,started,activations,host,WarmStartupDecision.Cold,"no-running");
+                    long exitDeadline=Math.Min(deadline,hooks.Elapsed()+DetachedClientExitMilliseconds);
+                    if(wallpaper&&Observe(hooks,deadline,scope=>hooks.WaitForDetachedClient(
+                        Remaining(exitDeadline,hooks.Elapsed())))){
+                        // The verified browser may exit before its renderer
+                        // processes. Give them the rest of the same grace window.
+                        for(;;){
+                            if(!Observe(hooks,deadline,scope=>hooks.IsRunning()))
+                                return Result(hooks,log,started,activations,WarmHostState.Faulted,WarmStartupDecision.Cold,"background-exit-complete");
+                            int delay=Math.Min(250,Remaining(exitDeadline,hooks.Elapsed()));
+                            if(delay<=0)break;
+                            hooks.Delay(delay);
+                        }
+                        return RetryAfterExit(hooks,log,started,activations,WarmHostState.Faulted,true);
+                    }
                     int budget=Math.Min(4000,Remaining(deadline,hooks.Elapsed()));
                     if(budget<=0)throw new TimeoutException();
                     activations=1;Record(hooks,log,started,activations,host,"activate","no-window");
@@ -122,8 +138,11 @@ namespace DragonLauncher
             }catch(Exception error){return Result(hooks,log,started,activations,host,WarmStartupDecision.Unavailable,
                 error.GetBaseException() is TimeoutException?"observation-timeout":"identity-unavailable");}
 
-            Record(hooks,log,started,activations,host,"needs-exit","host-unavailable");
-            bool stillRunning=false;
+            return RetryAfterExit(hooks,log,started,activations,host,false);
+        }
+        private static WarmStartupResult<T> RetryAfterExit<T>(WarmStartupHooks<T> hooks,Action<string> log,long started,int activations,WarmHostState host,bool stillRunning) where T : class
+        {
+            Record(hooks,log,started,activations,host,"needs-exit",stillRunning?"background-exit-pending":"host-unavailable");
             for(;;){
                 if(!hooks.AskRetry(stillRunning))
                     return Result(hooks,log,started,activations,host,WarmStartupDecision.Cancelled,"user-cancelled");
@@ -180,6 +199,31 @@ namespace DragonLauncher
                 return ClassifyManagedHost(status);
             }
         }
+        internal static bool IsDetachedHost(BridgeStatus status)
+        {
+            // HostFailure 72 is a lost renderer/transport during the
+            // control loop. A normal user wallpaper disable uses code 6.
+            return status!=null&&status.Disposition==2&&status.Disabled&&status.MediaCode==172;
+        }
+        private static bool WaitForDetachedClient(Settings settings,string root,Action<string> log,int milliseconds)
+        {
+            var clock=Stopwatch.StartNew();
+            using(var session=BridgeActivation.Discover(root,0,log)){
+                if(session==null||!IsDetachedHost(session.LastStatus))return false;
+                var identity=BridgeClientIdentity.Attest(settings,root,session,log);
+                if(identity==null)return true; // Recheck the official process inventory before continuing.
+                try{
+                    using(var process=BridgeNative.OpenReadProcess(identity.Pid)){
+                        IntPtr handle=process.DangerousGetHandle();long created;
+                        int wait=milliseconds-(int)Math.Min(milliseconds,clock.ElapsedMilliseconds);
+                        if(wait>0&&BridgeNative.IsAlive(handle)&&BridgeNative.CreationTime(handle,out created)&&
+                            identity.Matches(identity.Pid,created,BridgeNative.ImagePath(handle)))
+                            BridgeNative.WaitForExit(process,wait);
+                    }
+                }catch(System.ComponentModel.Win32Exception){} // The process can close between attestation and opening the wait handle.
+                return true;
+            }
+        }
         internal static WarmHostState ClassifyManagedHost(BridgeStatus status)
         {
             // User disable retires decoration with MediaCode=6. Preserve that
@@ -208,6 +252,7 @@ namespace DragonLauncher
             var hooks=new WarmStartupHooks<ExistingReplayTarget>{
                 Find=scope=>FindVerified(search),IsCurrent=target=>target.IsCurrent,
                 IsRunning=()=>CodexDragon.Official.OfficialIdentityResolver.IsOfficialRunning(),
+                WaitForDetachedClient=budget=>WaitForDetachedClient(settings,root,log,budget),
                 Activate=budget=>{AppActivation.OpenBounded(settings,budget);},
                 InspectHost=target=>InspectHost(settings,root,target,log),AskRetry=AskRetry,
                 Elapsed=()=>clock.ElapsedMilliseconds,Delay=Thread.Sleep,
