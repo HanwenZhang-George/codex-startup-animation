@@ -18,9 +18,20 @@ let browser;const started=Date.now(),deadline=setTimeout(()=>{if(browser)void br
  await page.setContent('<html><head><style>html,body,#root,main{width:100%;height:100%;margin:0}</style></head><body><div id="root"><main class="_MainContentSurface_test_2" data-app-shell-main-surface="default"><div class="_WorkspaceContent_test_2"></div></main></div></body></html>');
  await page.evaluate(()=>{
   window.frameCallbacks=[];const frame=HTMLVideoElement.prototype.requestVideoFrameCallback;
-  HTMLVideoElement.prototype.requestVideoFrameCallback=function(fn){frameCallbacks.push(fn);return frame.call(this,fn);};
+  window.withholdFrames=false;window.withheldFrames=[];
+  HTMLVideoElement.prototype.requestVideoFrameCallback=function(fn){
+   frameCallbacks.push(fn);
+   if(!withholdFrames)return frame.call(this,fn);
+   withheldFrames.push(fn);
+   return frame.call(this,()=>{});
+  };
   window.leaseCallbacks=[];const timeout=window.setTimeout;
-  window.setTimeout=(fn,ms,...args)=>{if(ms>44000&&ms<=45000)leaseCallbacks.push(()=>fn(...args));return timeout(fn,ms,...args);};
+  window.captureRevealDeadline=false;window.revealDeadlines=[];
+  window.setTimeout=(fn,ms,...args)=>{
+   if(ms>44000&&ms<=45000)leaseCallbacks.push(()=>fn(...args));
+   if(captureRevealDeadline&&ms===8000)revealDeadlines.push(()=>fn(...args));
+   return timeout(fn,ms,...args);
+  };
   window.docGeneration='0123456789abcdef0123456789abcdef';window.operation='123456789abcdef0123456789abcdef0';
   window.syntheticHidden=false;Object.defineProperty(document,'hidden',{configurable:true,get:()=>syntheticHidden});Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>syntheticHidden?'hidden':'visible'});
  });
@@ -28,7 +39,17 @@ let browser;const started=Date.now(),deadline=setTimeout(()=>{if(browser)void br
  check('Wrong document cannot renew lease',(await page.evaluate(()=>__codexDragonWallpaperV1.renewLease('ffffffffffffffffffffffffffffffff'))).code,'stale-generation');
  check('Expired operation rejected',(await page.evaluate(()=>__codexDragonWallpaperV1.prepare(operation,performance.now()-1))).code,'expired-operation');
  check('Future operation bound enforced',(await page.evaluate(()=>__codexDragonWallpaperV1.prepare(operation,performance.now()+2000))).code,'expired-operation');
- check('Fresh operation prepares',(await page.evaluate(()=>__codexDragonWallpaperV1.prepare(operation,performance.now()+1000))).ok);check('Fresh operation commits',(await page.evaluate(()=>__codexDragonWallpaperV1.commit(operation,performance.now()+1000))).ok);await visible();s=await status();const firstGeneration=s.mediaGeneration;check('Fresh commit presented original pixels',[s.videoWidth,s.videoHeight,s.activeClip],[2560,1440,'ambient']);check('Frame callbacks were actually installed',await page.evaluate(()=>frameCallbacks.length>0));
+ check('Fresh operation prepares',(await page.evaluate(()=>__codexDragonWallpaperV1.prepare(operation,performance.now()+1000))).ok);
+ await page.evaluate(()=>{captureRevealDeadline=true;withholdFrames=true;});
+ check('Fresh operation commits',(await page.evaluate(()=>__codexDragonWallpaperV1.commit(operation,performance.now()+1000))).ok);
+ await page.waitForFunction(()=>withheldFrames.length>0&&revealDeadlines.length===1);
+ s=await status();
+ check('A frame request alone leaves the reveal deadline armed',s.frameCallbackPending&&s.preparationTimerPending&&!s.firstFrameConfirmed);
+ await page.evaluate(()=>{captureRevealDeadline=false;revealDeadlines[0]();withheldFrames[0](performance.now(),{presentedFrames:1});withholdFrames=false;});
+ s=await status();
+ check('Missing first frame becomes a recoverable reveal timeout',s.recoveryNeeded&&s.recoveryReason==='reveal-timeout'&&!s.firstFrameConfirmed&&!s.stageVisible);
+ check('Reveal timeout accepts renderer recovery',(await page.evaluate(mediaGeneration=>__codexDragonWallpaperV1.recover(mediaGeneration),s.mediaGeneration)).ok);
+ await visible();s=await status();const firstGeneration=s.mediaGeneration;check('Recovered commit presented original pixels',[s.videoWidth,s.videoHeight,s.activeClip],[2560,1440,'ambient']);check('Frame callbacks were actually installed',await page.evaluate(()=>frameCallbacks.length>0));
  await page.evaluate(()=>{window.staleFrames=frameCallbacks.slice();__codexDragonWallpaperV1.memoryPressure(true);for(const fn of staleFrames)fn(performance.now(),{presentedFrames:1000000});});s=await status();check('Old presentation callbacks cannot certify hibernated decoder',s.dormant&&!s.firstFrameConfirmed&&!s.prepared&&!s.playing&&!s.stageVisible);
  await page.evaluate(()=>__codexDragonWallpaperV1.memoryPressure(false));await visible();s=await status();check('Wake increments media generation',s.mediaGeneration>firstGeneration);check('Old prepare cannot commit newer decoder',(await page.evaluate(()=>__codexDragonWallpaperV1.commit(operation,performance.now()+1000))).code,'stale-operation');
  await page.evaluate(()=>{__codexDragonWallpaperV1.pause();window.video=document.querySelector('video');window.originalPlay=video.play;video.play=()=>new Promise(resolve=>window.resolveOldPlay=resolve);__codexDragonWallpaperV1.reveal();__codexDragonWallpaperV1.pause();resolveOldPlay();});await page.waitForTimeout(20);s=await status();check('Late play promise cannot undo explicit pause',s.manuallyPaused&&!s.playing&&s.videoPaused);await page.evaluate(()=>video.play=originalPlay);

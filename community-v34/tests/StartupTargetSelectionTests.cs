@@ -66,13 +66,13 @@ public static class StartupTargetSelectionTests {
   Record(name,f,timer,failure,"actual candidate SelectTarget");
  }}
  static void EmitFrame(Peer p,Dictionary<string,object> packet){var bytes=Encoding.UTF8.GetBytes(Json.Serializer().Serialize(packet));typeof(CdpTransport).GetMethod("Frame",Flags).Invoke(p.Transport,new object[]{bytes,bytes.Length});}
- static void ReplacementPage(string root,bool crash){
+ static void ReplacementPage(string root,string name,bool crash=false,string rootError=null,int rootErrors=0,int expectedCode=0,int expectedReplacementReads=1){
   using(var f=new Fixture(root))using(var process=Process.GetCurrentProcess()){
    Set(Get(f.Transport,"client"),"ProcessHandle",process.Handle);
    var signal=(Action<string,string>)Delegate.CreateDelegate(typeof(Action<string,string>),f.Session,typeof(WallpaperSession).GetMethod("OnSignal",Flags));
    f.Transport.Signal+=signal;
    string firstGeneration=f.State.DocumentGeneration;
-   var attaches=new List<string>();int lists=0;bool secondLayout=false;
+   var attaches=new List<string>();int lists=0,replacementReads=0;bool secondLayout=false;
    f.Peer.Script=(peer,request,number)=>{
     var method=Json.Text(request,"method");int phase=(int)Get(f.Session,"phase");
     if(method=="Target.getTargets"){
@@ -91,6 +91,10 @@ public static class StartupTargetSelectionTests {
     if(method=="Runtime.addBinding"){peer.Reply(request,Json.Obj(),0);return;}
     Check(method=="Runtime.evaluate","unexpected request during startup page recovery");
     string session=Json.Text(request,"sessionId");
+    if(phase==2&&session=="target_2_session"&&++replacementReads<=rootErrors){
+     EmitFrame(peer,Json.Obj("id",Json.Get(request,"id"),"sessionId",session,"error",Json.Obj("code",-32000,"message",rootError)));
+     return;
+    }
     object value=phase==2?Json.Obj("rootReady",true,"bodyReady",true):
      phase==3?Json.Obj("namespaceFree",true,"ownNodeCount",0):
      phase==4?Json.Obj("ok",true,"code","installed"):Json.Obj("styleAccepted",true);
@@ -112,16 +116,29 @@ public static class StartupTargetSelectionTests {
    try{typeof(WallpaperSession).GetMethod("Prepare",Flags).Invoke(f.Session,null);}
    catch(TargetInvocationException e){failure=e.InnerException as HostFailure;if(failure==null)throw;}
    finally{f.Transport.Signal-=signal;}
-   if(crash)Check(failure!=null&&failure.Code==72&&attaches.Count==1&&!secondLayout,"a crashed target must remain terminal");
-   else Check(failure==null&&attaches.Count==2&&attaches[1]=="target_2"&&lists==3&&secondLayout,
-    "explicit detach must wait for the old target to disappear and prepare the replacement");
+   if(crash){
+    Check(failure!=null&&failure.Code==72&&attaches.Count==1&&!secondLayout,"a crashed target must remain terminal");
+   }else{
+    Check(attaches.Count==2&&attaches[1]=="target_2"&&lists==3,"explicit detach must wait for the old target to disappear before one replacement attach");
+    Check(replacementReads==expectedReplacementReads,"replacement read retry count changed");
+    Check((failure==null?0:failure.Code)==expectedCode&&secondLayout==(expectedCode==0),"unexpected replacement preparation result");
+    Check(f.Peer.Methods.FindAll(m=>m=="Runtime.addBinding").Count==(expectedCode==0?2:1),"root rejection replayed renderer installation");
+   }
    Check(!f.Peer.Methods.Contains("DOM.setFileInputFiles"),"files bound before the replacement was validated");
-   Record(crash?"startup-target-crash-terminal":"startup-detach-follows-replacement",f,timer,failure,"real preparation, browser events, and target selection");
+   Record(name,f,timer,failure,"real preparation, browser events, and target selection");
   }
  }
  public static int Main(string[] args){try{
   string root=args[0];Directory.CreateDirectory(root);bool lateOnly=args.Length>1&&args[1]=="late-target-only";
-  if(!lateOnly){ReplacementPage(root,false);ReplacementPage(root,true);}
+  if(!lateOnly){
+   ReplacementPage(root,"startup-detach-follows-replacement");
+   ReplacementPage(root,"startup-target-crash-terminal",crash:true);
+   ReplacementPage(root,"replacement-root-navigation-recovers",rootError:"Inspected target navigated or closed",rootErrors:1,expectedReplacementReads:2);
+   ReplacementPage(root,"replacement-root-context-recovers",rootError:"Cannot find default execution context",rootErrors:1,expectedReplacementReads:2);
+   ReplacementPage(root,"replacement-root-unrelated-error-terminal",rootError:"Unrelated server error",rootErrors:1,expectedCode:32);
+   ReplacementPage(root,"replacement-root-context-retry-capped",rootError:"Execution context was destroyed.",rootErrors:4,
+    expectedCode:CdpTransport.ExecutionContextUnavailable,expectedReplacementReads:4);
+  }
   if(args.Length>1&&args[1]=="replacement-only"){Console.WriteLine(Json.Serializer().Serialize(Json.Obj("passed",true,"cases",records)));return 0;}
   if(!lateOnly)using(var f=new Fixture(root)){
    f.Peer.Script=(p,r,n)=>p.Reply(r,Json.Text(r,"method")=="Target.getTargets"?Target(n):Json.Obj("sessionId","slow_fresh_session"),Json.Text(r,"method")=="Target.getTargets"?2400:0);

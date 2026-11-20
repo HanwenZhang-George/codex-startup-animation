@@ -366,7 +366,7 @@ internal static class PreparationDiagnostics {
 }
 internal sealed class RuntimeSnapshotRecorder {
     readonly Action<Dictionary<string,object>,string,long> record;
-    string lastState;long lastRecorded=-1;
+    string lastState;long lastRecorded=-1;bool recordedFirstVisibleFrame;
     internal RuntimeSnapshotRecorder():this(PreparationDiagnostics.RecordRuntimeObservation){}
     internal RuntimeSnapshotRecorder(Action<Dictionary<string,object>,string,long> record){this.record=record;}
     internal void Observe(Dictionary<string,object> status,string generation,long elapsed){try{
@@ -375,9 +375,12 @@ internal sealed class RuntimeSnapshotRecorder {
             Json.Bool(status,"commitAccepted")+"|"+Json.Bool(status,"firstFrameConfirmed")+"|"+Json.Bool(status,"revealed")+"|"+
             Json.Bool(status,"documentHidden")+"|"+Json.Bool(status,"memoryPressure")+"|"+Json.Bool(status,"wallpaperApplied")+"|"+
             Json.Bool(status,"layoutSupported")+"|"+Json.Text(status,"layoutReason")+"|"+Json.Text(status,"layoutSurfaceKind");
-        // Reuse already validated observations. No timer or extra CDP request.
-        // At most one trio per 2 s on transitions, or per 30 s in steady state.
-        if(lastRecorded>=0&&(elapsed-lastRecorded<2000||(signature==lastState&&elapsed-lastRecorded<30000)))return;
+        // A quick first frame can arrive during the reveal-pending cooldown.
+        // Record that proof once, then keep the normal rate limit.
+        bool firstVisibleFrame=!recordedFirstVisibleFrame&&Json.Bool(status,"commitAccepted")&&
+            Json.Bool(status,"firstFrameConfirmed")&&Json.Bool(status,"wallpaperApplied")&&Json.Bool(status,"stageVisible");
+        if(!firstVisibleFrame&&lastRecorded>=0&&(elapsed-lastRecorded<2000||(signature==lastState&&elapsed-lastRecorded<30000)))return;
+        recordedFirstVisibleFrame|=firstVisibleFrame;
         lastRecorded=elapsed;lastState=signature;record(status,generation,elapsed);
     }catch{}}
 }

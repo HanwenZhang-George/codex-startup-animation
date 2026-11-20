@@ -734,12 +734,13 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
   }
   function armFailureTimer(reason) {
     const epoch = generation, revision = frameRevision;
-    timer = setTimeout(() => {
-      if (disposed || retired || epoch !== generation || revision !== frameRevision) return;
+    const deadline = setTimeout(() => {
+      if (timer !== deadline || disposed || retired || epoch !== generation || revision !== frameRevision) return;
       timer = null;
       if (hidden() || layoutSuspended || manuallyPaused || frozen || leaseNeedsRenew) return;
       fail(reason);
     }, 8000);
+    timer = deadline;
   }
   function restoreMarker() {
     if (!markerApplied) return;
@@ -830,14 +831,21 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     if (!probeOnly && layoutSupported && (!deferred || revealed)) {
       document.documentElement.setAttribute(marker, 'v1'); markerApplied = true;
     }
-    if (revealWaiting) { revealWaiting = false; if (timer !== null) clearTimeout(timer); timer = null; }
     if (!settlePending && firstFrameConfirmed) return;
-    if (typeof video.requestVideoFrameCallback !== 'function') { if (settlePending || !mediaReady) ready(); return; }
+    if (typeof video.requestVideoFrameCallback !== 'function') {
+      clearRevealTimer(); revealWaiting = false;
+      if (settlePending || !mediaReady) ready();
+      return;
+    }
+    // Allow the compositor to present the visible video, but keep the reveal
+    // watchdog armed until a frame arrives. play() and a visible stage do not
+    // prove that the first frame was presented.
     const epoch = generation, revision = frameRevision;
     if (frame === null) frame = video.requestVideoFrameCallback(() => {
       if (disposed || !attached || epoch !== generation || revision !== frameRevision) return;
       frame = null;
-      firstFrameConfirmed = true; ready();
+      if (hidden() || layoutSuspended || manuallyPaused || frozen || leaseNeedsRenew) return;
+      firstFrameConfirmed = true; revealWaiting = false; ready();
     });
   }
   function resume() {

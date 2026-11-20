@@ -142,6 +142,14 @@ internal static class RuntimeDiagnosticsTests {
         status["layoutSurfaceKind"]="frame";recorder.Observe(status,"generation",35999);
         Check(stamps.Count==4,"changed surface still obeys two-second minimum");
         recorder.Observe(status,"generation",36000);Check(stamps.Count==5,"changed surface recorded once minimum interval reached");
+        var startupStamps=new List<long>();
+        var startupRecorder=new RuntimeSnapshotRecorder((s,g,t)=>startupStamps.Add(t));
+        status=Status();status["firstFrameConfirmed"]=false;status["wallpaperApplied"]=false;status["stageVisible"]=false;
+        startupRecorder.Observe(status,"generation",0);
+        status["commitAccepted"]=status["firstFrameConfirmed"]=status["wallpaperApplied"]=status["stageVisible"]=true;
+        startupRecorder.Observe(status,"generation",200);
+        startupRecorder.Observe(status,"generation",300);
+        Check(startupStamps.Count==2&&startupStamps[1]==200,"first visible wallpaper frame logged once inside the normal cooldown");
         var throwing=new RuntimeSnapshotRecorder((s,g,t)=>{throw new InvalidOperationException();});throwing.Observe(status,"generation",0);
         Check(true,"diagnostic failure never changes operation");
         MemoryPressureDiagnostics();

@@ -160,9 +160,9 @@ internal sealed class WallpaperSession {
     internal static string Guard(string inner){
         return "(() => {let targetAccepted=false,guardMask=0;try{const u=new URL(location.href),q=Array.from(u.searchParams.entries());guardMask=64;if(u.protocol==='app:')guardMask|=1;if(u.hostname==='-')guardMask|=2;if(u.pathname==='/index.html')guardMask|=4;if(!u.port&&!u.username&&!u.password)guardMask|=8;if(!u.hash)guardMask|=16;if((!q.length&&!u.search)||(q.length===1&&q[0][0]==='initialRoute'&&q[0][1].length<=2048&&q[0][1].startsWith('/')&&!q[0][1].startsWith('//')&&!/[\\x00-\\x1f\\x7f]/.test(q[0][1])))guardMask|=32;targetAccepted=guardMask===127;}catch{}if(!targetAccepted)return {targetAccepted:false,guardMask};return ("+inner.Trim().TrimEnd(';')+");})()";
     }
-    Dictionary<string,object> Eval(string expression,bool promise,int timeout){
+    Dictionary<string,object> Eval(string expression,bool promise,int timeout,bool classifyExecutionContext=false){
         observationStarted=Stopwatch.GetTimestamp();
-        var m=cdp.Send("Runtime.evaluate",Json.Obj("expression",Guard(expression),"returnByValue",true,"awaitPromise",promise,"userGesture",false),session,timeout);
+        var m=cdp.Send("Runtime.evaluate",Json.Obj("expression",Guard(expression),"returnByValue",true,"awaitPromise",promise,"userGesture",false),session,timeout,classifyExecutionContext);
         observationReceived=Stopwatch.GetTimestamp();
         if(Json.Get(m,"exceptionDetails")!=null)throw new HostFailure(60);
         var result=Json.Map(Json.Get(m,"result"));var value=Json.Map(Json.Get(result,"value"));
@@ -235,7 +235,7 @@ internal sealed class WallpaperSession {
             if(left<=0)throw new HostFailure(kind==1?63:kind==2?66:68);
             int requestBudget=Math.Min(1500,left);var request=Stopwatch.StartNew();int code=199,stage=0;
             Dictionary<string,object> status=null;HostFailure retry=null;
-            try{status=Eval(expression,false,requestBudget);code=0;}
+            try{status=Eval(expression,false,requestBudget,kind==1&&retiredTargets.Count>0);code=0;}
             catch(HostFailure error){
                 code=100+error.Code;stage=error.TimeoutStage;
                 if(error.Code!=37||stage!=3)throw;retry=error;
@@ -266,7 +266,7 @@ internal sealed class WallpaperSession {
         finally{PreparationDiagnostics.RecordTargetRequest(kind,request.ElapsedMilliseconds,budget,code,stage,cdp);}
     }
     const int ColdTargetBudgetMilliseconds=30000,TargetReadBudgetMilliseconds=2000,SlowTargetReadBudgetMilliseconds=4000,TargetAttachBudgetMilliseconds=12000;
-    const int StartupPageBudgetMilliseconds=48000,MaximumStartupPageReplacements=2;
+    const int StartupPageBudgetMilliseconds=48000,MaximumStartupPageReplacements=2,MaximumReplacementRootRetries=3;
     void WaitForTarget(Stopwatch clock,int budget,int delay){
         var wait=Stopwatch.StartNew();
         // Bounded, non-spinning waits; do not consume control notifications.
@@ -367,11 +367,17 @@ internal sealed class WallpaperSession {
         CheckPreparationResources();
         SetPhase(1);SelectTarget();SetPhase(2);var shellClock=Stopwatch.StartNew();var clock=Stopwatch.StartNew();bool rootReady=false;HostFailure lastGuard=null;
         int shellBudget=Math.Min(12000,Deadline.Remaining(StartupPageBudgetMilliseconds,preparationClock.ElapsedMilliseconds));
-        int rootBudget=Math.Min(4000,shellBudget);
+        int rootBudget=Math.Min(4000,shellBudget),contextRetries=0;
         while(clock.ElapsedMilliseconds<rootBudget&&!Disabled){
             CheckPreparationResources();
             try{var ready=ReadPreparation(1,clock,rootBudget);if(ready==null)return;if(Json.Bool(ready,"rootReady")&&Json.Bool(ready,"bodyReady")){rootReady=true;break;}}
-            catch(HostFailure e){if(e.Code<61000||e.Code>64999)throw;lastGuard=e;}
+            catch(HostFailure e){
+                // A replacement target can attach before its execution context
+                // exists. Only the guarded root read can wait for that context.
+                if(e.Code==CdpTransport.ExecutionContextUnavailable&&contextRetries<MaximumReplacementRootRetries)contextRetries++;
+                else if(e.Code>=61000&&e.Code<=64999)lastGuard=e;
+                else throw;
+            }
             WaitForPreparation(clock,rootBudget,200);
         }
         if(Disabled)return;
