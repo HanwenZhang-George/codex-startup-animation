@@ -132,7 +132,7 @@ public static class StartupReadinessTests {
   Context(root,"disabled-inflight",f=>f.State.Command("disable"),0);
   Case(root,"layout-pressure-defers-decoder-only",f=>{f.EnablePressure();f.Peer.Intercept=r=>{if(r.Kind!="layout")return false;f.Peer.Later(100,()=>f.Pressure=true);f.Peer.Value(r,f.Peer.Status(false),400);return true;};},(f,e,ms)=>{Check(e==null&&!f.State.Disabled&&!f.State.Ready&&!f.State.Prepared&&f.State.MemoryPressure&&f.State.Attached&&f.State.ActualPhase=="hibernating","pressure did not defer decoder safely");Check(f.Peer.Count("document")==1&&f.Peer.Count("media-attach")==1&&f.Peer.Count("pressure-on")==1,"lightweight preparation was restarted or skipped");Check(ms<1500,"pressure introduced extra preparation wait");});
   Context(root,"session-changed",f=>Set(f.Session,"session","changed_session"),72);
-  Context(root,"document-generation-changed",f=>Set(f.State,"DocumentGeneration",Guid.NewGuid().ToString("N")),72);
+  Context(root,"document-generation-changed",f=>f.State.FollowStartupPage(),72);
   Context(root,"target-lost",f=>Set(f.Session,"targetLost",true),72);
   Context(root,"transport-lost",f=>Set(f.Session,"transportLost",true),72);
   foreach(string field in new[]{"documentGeneration","protocolVersion"}){string key=field;Case(root,"layout-rejects-wrong-"+key,f=>f.Peer.Intercept=r=>{if(r.Kind!="layout")return false;var value=f.Peer.Status(false);value[key]=key=="documentGeneration"?(object)"wrong_generation":3;f.Peer.Value(r,value);return true;},(f,e,ms)=>{Failure(f,e,6,70);Check(f.Peer.Count("layout")==1&&f.Peer.Count("document")==0,"invalid snapshot accepted");});}

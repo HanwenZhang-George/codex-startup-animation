@@ -26,9 +26,16 @@ internal sealed class CdpTransport {
     sealed class Pending { internal readonly ManualResetEventSlim Done=new ManualResetEventSlim(false,0);internal object Result;internal int Error;internal string Session; }
     readonly OwnedClient client;readonly bool isolated;readonly object gate=new object(),writeGate=new object();
     readonly Dictionary<int,Pending> pending=new Dictionary<int,Pending>();int nextId;int fault;volatile bool ended;
-    long bytesReceived,framesReceived,matchedResponses,lateResponses;int targetLossKind;
+    sealed class TargetLoss {
+        internal readonly string Session;
+        internal readonly int Kind;
+        internal TargetLoss(string session,int kind){Session=session;Kind=kind;}
+    }
+    long bytesReceived,framesReceived,matchedResponses,lateResponses;
+    volatile TargetLoss lastTargetLoss;
     internal int FaultCode {get{return Interlocked.CompareExchange(ref fault,0,0);}}
-    internal int TargetLossKind {get{return Interlocked.CompareExchange(ref targetLossKind,0,0);}}
+    internal int TargetLossKind {get{var loss=lastTargetLoss;return loss==null?0:loss.Kind;}}
+    internal int LossForSession(string session){var loss=lastTargetLoss;return loss!=null&&session==loss.Session?loss.Kind:0;}
     internal int ProcessExitState {get{try{return client==null?-1:client.ProcessExitState;}catch{return -1;}}}
     internal long BytesReceived {get{return Interlocked.Read(ref bytesReceived);}}
     internal long FramesReceived {get{return Interlocked.Read(ref framesReceived);}}
@@ -39,6 +46,10 @@ internal sealed class CdpTransport {
     static readonly HashSet<string> allowed=new HashSet<string>{"Target.getTargets","Target.attachToTarget","Target.detachFromTarget","Runtime.evaluate","Runtime.addBinding","Runtime.removeBinding","DOM.getDocument","DOM.querySelector","DOM.describeNode","DOM.setFileInputFiles"};
     internal CdpTransport(OwnedClient owned,bool test){client=owned;isolated=test;var thread=new Thread(ReadLoop){IsBackground=true,Name="Wallpaper CDP receive"};thread.Start();}
     void Notify(string kind,string session){var handler=Signal;if(handler!=null)try{handler(kind,session);}catch{}}
+    void NotifyTargetLoss(string session,int kind){
+        lastTargetLoss=new TargetLoss(session,kind);
+        Notify("target-lost",session);
+    }
     void Fail(int code){bool first=Interlocked.CompareExchange(ref fault,code,0)==0;lock(gate){foreach(var request in pending.Values){request.Error=code;request.Done.Set();}}if(first)Notify("transport-fault",null);}
     void Frame(byte[] buffer,int count){
         Interlocked.Increment(ref framesReceived);
@@ -46,8 +57,8 @@ internal sealed class CdpTransport {
             object idObject=Json.Get(m,"id");if(!(idObject is int)){
                 string method=Json.Text(m,"method"),eventSession=Json.Text(m,"sessionId");var parameters=Json.Get(m,"params") as Dictionary<string,object>;
                 if(parameters!=null&&method=="Runtime.bindingCalled"&&Json.Text(parameters,"name")=="__codexDragonNotifyV2"&&Json.Text(parameters,"payload")=="state")Notify("renderer-state",eventSession);
-                else if(parameters!=null&&method=="Target.detachedFromTarget"){Interlocked.Exchange(ref targetLossKind,1);Notify("target-lost",Json.Text(parameters,"sessionId"));}
-                else if(method=="Inspector.targetCrashed"||method=="Inspector.detached"){Interlocked.Exchange(ref targetLossKind,method=="Inspector.targetCrashed"?2:3);Notify("target-lost",eventSession);}
+                else if(parameters!=null&&method=="Target.detachedFromTarget")NotifyTargetLoss(Json.Text(parameters,"sessionId"),1);
+                else if(method=="Inspector.targetCrashed"||method=="Inspector.detached")NotifyTargetLoss(eventSession,method=="Inspector.targetCrashed"?2:3);
                 return;
             }int id=(int)idObject;Pending request;
             lock(gate){if(!pending.TryGetValue(id,out request)){Interlocked.Increment(ref lateResponses);return;}

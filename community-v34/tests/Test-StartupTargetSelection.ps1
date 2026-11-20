@@ -1,7 +1,7 @@
 ﻿param(
     [string]$Source,
     [Parameter(Mandatory=$true)][string]$OutputDirectory,
-    [ValidateSet('all','late-target-only')][string]$Scenario='all'
+    [ValidateSet('all','late-target-only','replacement-only')][string]$Scenario='all'
 )
 $ErrorActionPreference='Stop'
 $scriptDirectory=Split-Path -Parent $PSCommandPath

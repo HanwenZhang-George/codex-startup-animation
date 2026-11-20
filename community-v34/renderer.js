@@ -363,14 +363,24 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     // sample chat text, descendants, computed paint, or per-frame state.
     return bindingAttributes.every(entry => entry.node.isConnected && entry.values.every((value, index) => value === entry.node.getAttribute(shellAttributeFilter[index])));
   }
+  function componentClasses(node, name) {
+    return String(node.className || '').split(/\s+/)
+      .filter(token => token.startsWith('_' + name + '_') || token.startsWith(name + '-'));
+  }
   function componentToken(node, name) {
-    const prefix = '_' + name + '_';
-    const tokens = String(node.className || '').split(/\s+/).filter(token => token.startsWith(prefix));
+    const tokens = componentClasses(node, name);
     // The complete known component token is mandatory. A partial match or two
     // versions on one node is ambiguous, even if one happens to be supported.
     if (tokens.length !== 1) return null;
-    const match = /^_[A-Za-z]+_([A-Za-z0-9]+)_([0-9]+)$/.exec(tokens[0]);
-    return match ? { token: tokens[0], hash: match[1] } : null;
+    const token = tokens[0];
+    const legacy = /^_[A-Za-z]+_([A-Za-z0-9]+)_[0-9]+$/.exec(token);
+    if (legacy) return { token, moduleHash: legacy[1] };
+    return /^[A-Za-z]+-[A-Za-z0-9_-]{6}$/.test(token) ? { token, moduleHash: null } : null;
+  }
+  function compatibleShellTokens(first, second) {
+    // The old compiler shared a hash across a CSS module. The current one
+    // hashes each component separately. Keep the structural checks for both.
+    return first && second && first.moduleHash === second.moduleHash;
   }
   function bindSurfaceStyle(main, workspace, mainToken, workspaceToken, frameOnly = false) {
     const core = (frameOnly ? 'frame ' : 'main ') + mainToken.token + ' ' + workspaceToken.token;
@@ -407,9 +417,9 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
       containers.add(child);
       if (!children(child)) return false;
       for (const wrapper of child.children) {
-        if (String(wrapper.className || '').split(/\s+/).some(token => token.startsWith('_MainContentFrame_'))) {
+        if (componentClasses(wrapper, 'MainContentFrame').length) {
           const frameToken = componentToken(wrapper, 'MainContentFrame');
-          if (!frameToken || frameToken.hash !== mainToken.hash || wrapper.children.length > 128) return false;
+          if (!compatibleShellTokens(frameToken, mainToken) || wrapper.children.length > 128) return false;
           containers.add(wrapper);
           let fadeWrapper = null;
           for (const chromeWrapper of wrapper.children) {
@@ -420,7 +430,7 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
             let fadeNode = null;
             for (const decoration of chromeWrapper.children) {
               if (decoration.tagName !== 'DIV' || decoration.getAttribute('aria-hidden') !== 'true' ||
-                  !String(decoration.className || '').split(/\s+/).some(token => token.startsWith('_MainContentTopFade_'))) continue;
+                  !componentClasses(decoration, 'MainContentTopFade').length) continue;
               if (fadeNode) return false;
               fadeNode = decoration; nodes.add(decoration);
               if (nodes.size > 128) return false;
@@ -441,9 +451,9 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     for (const node of nodes) {
       if (node.closest('[data-app-shell-active-page="false"]')) continue;
       for (const name of shellComponents) {
-        if (!String(node.className || '').split(/\s+/).some(token => token.startsWith('_' + name + '_'))) continue;
+        if (!componentClasses(node, name).length) continue;
         const actual = componentToken(node, name);
-        if (!actual || actual.hash !== mainToken.hash || (bindings[name] && bindings[name] !== actual.token)) return false;
+        if (!compatibleShellTokens(actual, mainToken) || (bindings[name] && bindings[name] !== actual.token)) return false;
         bindings[name] = actual.token; attributeNodes.add(node);
       }
     }
@@ -491,9 +501,9 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     const token = componentToken(selected, 'Layout'), pageToken = componentToken(selected, 'PageSurfaceLayout');
     layoutAudit.layoutAuditLayoutTokenValid = token ? 1 : 0;
     layoutAudit.layoutAuditPageLayoutTokenValid = pageToken ? 1 : 0;
-    layoutAudit.layoutAuditFrameHashMatches = token && pageToken ? (token.hash === pageToken.hash ? 1 : 0) : -1;
+    layoutAudit.layoutAuditFrameHashMatches = token && pageToken ? (compatibleShellTokens(token, pageToken) ? 1 : 0) : -1;
     layoutAudit.layoutAuditPageSurfaceFlag = selected.getAttribute('data-app-shell-page-surface') === 'true' ? 1 : 0;
-    if (selected.tagName !== 'DIV' || selected.getAttribute('data-app-shell-page-surface') !== 'true' || !token || !pageToken || pageToken.hash !== token.hash || selected.children.length > 128) return null;
+    if (selected.tagName !== 'DIV' || selected.getAttribute('data-app-shell-page-surface') !== 'true' || !compatibleShellTokens(token, pageToken) || selected.children.length > 128) return null;
     layoutReason = 'frame-row';
     let row = null, rowInvalid = false;
     layoutAudit.layoutAuditDirectRowCount = 0;
@@ -517,10 +527,10 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
     layoutAudit.layoutAuditDecorationCount = 0; layoutAudit.layoutAuditDecorationValid = 0;
     let decorationInvalid = false;
     for (const child of row.children) {
-      if (!String(child.className || '').split(/\s+/).some(value => value.startsWith('_PageSurface_'))) continue;
+      if (!componentClasses(child, 'PageSurface').length) continue;
       layoutAudit.layoutAuditDecorationCount++;
       const decoration = componentToken(child, 'PageSurface');
-      if (pageSurface || !decoration || decoration.hash !== token.hash || child.tagName !== 'DIV' || child.getAttribute('aria-hidden') !== 'true') decorationInvalid = true;
+      if (pageSurface || !compatibleShellTokens(decoration, token) || child.tagName !== 'DIV' || child.getAttribute('aria-hidden') !== 'true') decorationInvalid = true;
       if (!pageSurface) pageSurface = child;
     }
     if (!pageSurface || decorationInvalid) return null;
@@ -547,11 +557,10 @@ html[data-codex-dragon-background="v1"] #root main._MainContentSurface_yl8z4_2[d
       layoutReason = 'workspace-shape';
       let actualWorkspace = null;
       for (const child of main.children) {
-        if (!String(child.className || '').split(/\s+/).some(token => token.startsWith('_WorkspaceContent_'))) continue;
+        if (!componentClasses(child, 'WorkspaceContent').length) continue;
         if (actualWorkspace) return null;
         actualWorkspace = componentToken(child, 'WorkspaceContent'); selectedChild = child;
-        // A module hash is shared; each component's final index is independent.
-        if (!actualWorkspace || actualWorkspace.hash !== actualMain.hash) return null;
+        if (!compatibleShellTokens(actualWorkspace, actualMain)) return null;
       }
       if (!actualWorkspace) return null;
       selected = main; selectedMain = actualMain; selectedWorkspace = actualWorkspace;
